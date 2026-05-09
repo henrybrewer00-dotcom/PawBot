@@ -34,6 +34,8 @@ final class PawbotModel: ObservableObject {
     @Published var selectedAction = "Read aloud"
     @Published var isListening = false
     @Published var notificationIndex = 0
+    @Published var draftText = ""
+    @Published var hasStartedConversation = false
 
     let actions = [
         PawbotAction(title: "Read aloud", subtitle: "Speak the current text", icon: "speaker.wave.2.fill", color: .blue),
@@ -80,6 +82,21 @@ final class PawbotModel: ObservableObject {
         }
     }
 
+    func noteTyping(_ text: String) {
+        draftText = text
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        withAnimation(.easeInOut(duration: 0.85)) {
+            hasStartedConversation = true
+        }
+    }
+
+    func sendPrototypeMessage() {
+        guard !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        withAnimation(.easeInOut(duration: 0.85)) {
+            hasStartedConversation = true
+        }
+    }
+
     func cycleNotice() {
         withAnimation(.easeInOut(duration: 0.9)) {
             notificationIndex = (notificationIndex + 1) % notifications.count
@@ -122,7 +139,7 @@ final class PawbotWindowController {
     init() {
         let contentView = PawbotRootView(model: model)
         window = NSWindow(
-            contentRect: .init(x: 0, y: 0, width: 500, height: 520),
+            contentRect: .init(x: 0, y: 0, width: 620, height: 560),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -154,6 +171,7 @@ final class PawbotWindowController {
 struct PawbotRootView: View {
     @ObservedObject var model: PawbotModel
     @State private var glow = false
+    @State private var iconDraw = false
 
     var body: some View {
         ZStack(alignment: .trailing) {
@@ -165,7 +183,7 @@ struct PawbotRootView: View {
                         insertion: .move(edge: .trailing).combined(with: .opacity).combined(with: .scale(scale: 0.98, anchor: .trailing)),
                         removal: .move(edge: .trailing).combined(with: .opacity)
                     ))
-                    .padding(.trailing, 56)
+                    .padding(.trailing, 58)
             }
 
             VStack(spacing: 12) {
@@ -178,10 +196,13 @@ struct PawbotRootView: View {
             }
             .padding(.trailing, 12)
         }
-        .frame(width: 500, height: 520)
+        .frame(width: 620, height: 560)
         .onAppear {
             withAnimation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true)) {
                 glow = true
+            }
+            withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: false)) {
+                iconDraw = true
             }
             model.showFirstPeekWhenSettled()
         }
@@ -190,8 +211,14 @@ struct PawbotRootView: View {
     private var sideTab: some View {
         Button(action: model.toggleExpanded) {
             VStack(spacing: 9) {
-                AssistantMark(isActive: glow)
-                    .frame(width: 38, height: 38)
+                ZStack {
+                    AssistantMark(isActive: glow)
+                        .frame(width: 38, height: 38)
+
+                    DrawnIconRing(progress: iconDraw ? 1 : 0)
+                        .frame(width: 52, height: 52)
+                        .opacity(model.isExpanded ? 0.35 : 0.9)
+                }
 
                 Text("Pawbot")
                     .font(.system(size: 16, weight: .bold, design: .rounded))
@@ -253,7 +280,7 @@ struct PawbotRootView: View {
     }
 
     private var expandedPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: model.hasStartedConversation ? 14 : 12) {
             HStack(spacing: 12) {
                 AssistantMark(isActive: true)
                     .frame(width: 42, height: 42)
@@ -278,17 +305,30 @@ struct PawbotRootView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                ChatBubble(text: "Need help with what's on screen?", isUser: false)
+                ChatBubble(text: model.hasStartedConversation ? "I can help. What should we make easier?" : "Need help with what's on screen?", isUser: false)
+
+                if model.hasStartedConversation {
+                    ChatBubble(text: model.draftText.isEmpty ? "Can you help me with this?" : model.draftText, isUser: true)
+                    ChatBubble(text: "Sure. I’ll keep it simple and go one step at a time.", isUser: false)
+                }
             }
 
-            LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 10) {
-                ForEach(model.actions) { action in
-                    ActionCard(action: action, isSelected: model.selectedAction == action.title) {
-                        withAnimation(.easeInOut(duration: 0.55)) {
-                            model.selectedAction = action.title
+            if !model.hasStartedConversation {
+                LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 10) {
+                    ForEach(model.actions) { action in
+                        ActionCard(action: action, isSelected: model.selectedAction == action.title) {
+                            withAnimation(.easeInOut(duration: 0.55)) {
+                                model.selectedAction = action.title
+                            }
                         }
                     }
                 }
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ConversationHint(icon: "text.magnifyingglass", title: "Bigger text", message: "I can enlarge the part you’re reading.")
+                    ConversationHint(icon: "speaker.wave.2.fill", title: "Read aloud", message: "I can speak the answer slowly.")
+                }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
             HStack(spacing: 12) {
@@ -296,10 +336,13 @@ struct PawbotRootView: View {
                     Image(systemName: "text.cursor")
                         .font(.system(size: 19, weight: .bold))
                         .foregroundStyle(.secondary)
-                    Text("Ask Pawbot...")
-                        .font(.system(size: 19, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                    Spacer()
+                    TextField("Ask Pawbot...", text: Binding(
+                        get: { model.draftText },
+                        set: { model.noteTyping($0) }
+                    ))
+                    .font(.system(size: 19, weight: .semibold, design: .rounded))
+                    .textFieldStyle(.plain)
+                    .onSubmit(model.sendPrototypeMessage)
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 52)
@@ -318,7 +361,7 @@ struct PawbotRootView: View {
             }
         }
         .padding(18)
-        .frame(width: 390)
+        .frame(width: model.hasStartedConversation ? 500 : 390)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 26, style: .continuous)
@@ -327,6 +370,31 @@ struct PawbotRootView: View {
         .shadow(color: .black.opacity(0.15), radius: 22, x: 0, y: 12)
     }
 
+}
+
+struct DrawnIconRing: View {
+    let progress: CGFloat
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 19, style: .continuous)
+                .trim(from: max(0, progress - 0.72), to: progress)
+                .stroke(
+                    Color.blue.opacity(0.78),
+                    style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
+                )
+                .rotationEffect(.degrees(-12))
+
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .trim(from: max(0, progress - 0.5), to: progress)
+                .stroke(
+                    Color.teal.opacity(0.42),
+                    style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+                )
+                .rotationEffect(.degrees(18))
+                .padding(3)
+        }
+    }
 }
 
 struct AssistantMark: View {
@@ -414,6 +482,34 @@ struct ActionCard: View {
             .scaleEffect(isSelected ? 1.015 : 1)
         }
         .buttonStyle(.plain)
+    }
+}
+
+struct ConversationHint: View {
+    let icon: String
+    let title: String
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.blue)
+                .frame(width: 34, height: 34)
+                .background(.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                Text(message)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(12)
+        .background(.white.opacity(0.5), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
