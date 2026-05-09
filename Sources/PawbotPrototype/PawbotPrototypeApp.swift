@@ -97,7 +97,6 @@ final class PawbotModel: ObservableObject {
         fontScale = 1.0
         screenshotPollingTask?.cancel()
         screenshotPollingTask = nil
-        PawbotConsent.userConsentedThisSession = false
         Task { await PawbotAI.shared.resetHistory() }
     }
 
@@ -275,20 +274,29 @@ final class PawbotModel: ObservableObject {
 
     private func startScreenshotPolling(retryPrompt: String?) {
         screenshotPollingTask?.cancel()
+        isPawbotThinking = true
         screenshotPollingTask = Task { @MainActor [weak self] in
-            for tick in 0..<120 {
-                try? await Task.sleep(for: .seconds(1))
+            let totalTicks = 60
+            let intervalSeconds = 3
+            for tick in 0..<totalTicks {
+                try? await Task.sleep(for: .seconds(intervalSeconds))
                 if Task.isCancelled { return }
+                guard let self else { return }
                 if PawbotScreenCapture.tryCapture() != nil {
-                    guard let self else { return }
-                    self.appendBot("Got it — permission granted. Taking a look now.")
-                    self.lookAtScreen(prompt: retryPrompt)
+                    self.isPawbotThinking = false
+                    self.appendBot("Got it — I can see the screen now. Taking a look.")
+                    self.lookAtScreen(prompt: retryPrompt, skipConsent: true)
                     return
                 }
-                if tick == 25 {
-                    self?.appendBot("If macOS isn't picking it up, try fully quitting Pawbot and reopening — that's a common quirk for unsigned apps.")
+                let elapsed = (tick + 1) * intervalSeconds
+                if elapsed == 15 {
+                    self.appendBot("Still waiting for macOS to flip the switch — I'll keep checking every few seconds.")
+                } else if elapsed == 45 {
+                    self.appendBot("If it's not catching, try fully quitting Pawbot (⌘Q) and reopening. Unsigned apps sometimes need a relaunch for macOS to register the permission.")
                 }
             }
+            self?.isPawbotThinking = false
+            self?.appendBot("I gave up waiting on permission. Tap the Explain my screen button when you're ready and I'll try again.")
         }
     }
 
@@ -959,7 +967,7 @@ actor PawbotAI {
     private let apiKey: String?
     private let endpoint = URL(string: "https://api.x.ai/v1/chat/completions")!
     private let textModelCandidates = ["grok-4-fast-non-reasoning", "grok-4-0709", "grok-3", "grok-3-mini", "grok-2-latest"]
-    private let visionModelCandidates = ["grok-4-fast-non-reasoning", "grok-4-0709", "grok-4-fast-reasoning"]
+    private let visionModelCandidates = ["grok-4-0709", "grok-4-fast-non-reasoning", "grok-4-fast-reasoning"]
     private var cachedTextModel: String?
     private var cachedVisionModel: String?
     private var discoveredModels: [String]?
@@ -975,8 +983,8 @@ actor PawbotAI {
 
     init() {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 12
-        config.timeoutIntervalForResource = 14
+        config.timeoutIntervalForRequest = 45
+        config.timeoutIntervalForResource = 60
         self.session = URLSession(configuration: config)
         self.apiKey = Self.loadAPIKey()
     }
@@ -1082,9 +1090,11 @@ actor PawbotAI {
 
     func describe(image: NSImage, prompt: String) async throws -> String {
         guard let apiKey else { throw PawbotAIError.missingKey }
-        guard let pngData = image.pngData() else { throw PawbotAIError.noContent }
-        let base64 = pngData.base64EncodedString()
-        let dataURL = "data:image/png;base64,\(base64)"
+        guard let jpegData = image.compressedJPEGData(maxWidth: 1280, quality: 0.65) else {
+            throw PawbotAIError.noContent
+        }
+        let base64 = jpegData.base64EncodedString()
+        let dataURL = "data:image/jpeg;base64,\(base64)"
 
         let messages: [[String: Any]] = [
             ["role": "system", "content": systemPrompt],
@@ -1127,6 +1137,47 @@ extension NSImage {
     func pngData() -> Data? {
         guard let tiff = tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
         return rep.representation(using: .png, properties: [:])
+    }
+
+    func compressedJPEGData(maxWidth: CGFloat, quality: CGFloat) -> Data? {
+        guard let tiff = tiffRepresentation, let original = NSBitmapImageRep(data: tiff) else { return nil }
+        let originalWidth = CGFloat(original.pixelsWide)
+        let originalHeight = CGFloat(original.pixelsHigh)
+        let bitmap: NSBitmapImageRep
+        if originalWidth > maxWidth {
+            let scale = maxWidth / originalWidth
+            let targetWidth = Int(originalWidth * scale)
+            let targetHeight = Int(originalHeight * scale)
+            guard let resized = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: targetWidth,
+                pixelsHigh: targetHeight,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ) else { return nil }
+            resized.size = NSSize(width: targetWidth, height: targetHeight)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: resized)
+            NSGraphicsContext.current?.imageInterpolation = .high
+            original.draw(
+                in: NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight),
+                from: .zero,
+                operation: .copy,
+                fraction: 1.0,
+                respectFlipped: false,
+                hints: nil
+            )
+            NSGraphicsContext.restoreGraphicsState()
+            bitmap = resized
+        } else {
+            bitmap = original
+        }
+        return bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality])
     }
 }
 
