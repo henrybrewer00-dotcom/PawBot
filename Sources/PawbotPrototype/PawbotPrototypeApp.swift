@@ -39,7 +39,7 @@ struct PawbotMessage: Identifiable, Equatable {
 final class PawbotModel: ObservableObject {
     @Published var isExpanded = false
     @Published var showPeek = false
-    @Published var selectedAction = "Read aloud"
+    @Published var selectedAction = "Explain my screen"
     @Published var isListening = false
     @Published var notificationIndex = 0
     @Published var draftText = ""
@@ -53,9 +53,8 @@ final class PawbotModel: ObservableObject {
     private var screenshotPollingTask: Task<Void, Never>?
 
     let actions = [
-        PawbotAction(title: "Read aloud", subtitle: "Speak the current text", icon: "speaker.wave.2.fill", color: .blue),
+        PawbotAction(title: "Explain my screen", subtitle: "See and explain it plainly", icon: "eye.fill", color: .orange),
         PawbotAction(title: "Make bigger", subtitle: "Increase screen text", icon: "textformat.size", color: .green),
-        PawbotAction(title: "Explain simply", subtitle: "Plain language help", icon: "lightbulb.fill", color: .orange),
         PawbotAction(title: "Help me reply", subtitle: "Draft a friendly answer", icon: "bubble.left.and.bubble.right.fill", color: .indigo)
     ]
 
@@ -135,7 +134,7 @@ final class PawbotModel: ObservableObject {
             isPawbotThinking = true
         }
 
-        if screenshotPollingTask != nil, CGPreflightScreenCaptureAccess() {
+        if screenshotPollingTask != nil, PawbotScreenCapture.tryCapture() != nil {
             screenshotPollingTask?.cancel()
             screenshotPollingTask = nil
             lookAtScreen(prompt: trimmed)
@@ -187,9 +186,8 @@ final class PawbotModel: ObservableObject {
             withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
         }
         switch action.title {
-        case "Read aloud": readLatestAloud()
+        case "Explain my screen": lookAtScreen()
         case "Make bigger": cycleFontSize()
-        case "Explain simply": lookAtScreen()
         case "Help me reply": startReplyHelper()
         default: break
         }
@@ -248,14 +246,17 @@ final class PawbotModel: ObservableObject {
     private func startScreenshotPolling(retryPrompt: String?) {
         screenshotPollingTask?.cancel()
         screenshotPollingTask = Task { @MainActor [weak self] in
-            for _ in 0..<60 {
+            for tick in 0..<120 {
                 try? await Task.sleep(for: .seconds(1))
                 if Task.isCancelled { return }
-                if CGPreflightScreenCaptureAccess() {
+                if PawbotScreenCapture.tryCapture() != nil {
                     guard let self else { return }
                     self.appendBot("Got it — permission granted. Taking a look now.")
                     self.lookAtScreen(prompt: retryPrompt)
                     return
+                }
+                if tick == 25 {
+                    self?.appendBot("If macOS isn't picking it up, try fully quitting Pawbot and reopening — that's a common quirk for unsigned apps.")
                 }
             }
         }
@@ -589,7 +590,7 @@ struct PawbotRootView: View {
 
                 HStack(spacing: 8) {
                     ForEach(model.actions) { action in
-                        QuickActionPill(action: action, isActive: action.title == "Read aloud" && model.isSpeaking) {
+                        QuickActionPill(action: action, isActive: false) {
                             model.performAction(action)
                         }
                     }
@@ -1124,22 +1125,24 @@ enum PawbotScreenCaptureResult {
 
 enum PawbotScreenCapture {
     @MainActor
-    static func captureWithPermission() async -> PawbotScreenCaptureResult {
-        if !CGPreflightScreenCaptureAccess() {
-            CGRequestScreenCaptureAccess()
-            try? await Task.sleep(for: .milliseconds(400))
-            if !CGPreflightScreenCaptureAccess() {
-                return .denied
-            }
-        }
-        guard let displayID = NSScreen.main?.displayID else {
-            return .failed("no main display")
-        }
-        guard let cgImage = CGDisplayCreateImage(displayID) else {
-            return .failed("CGDisplayCreateImage returned nil — permission may be needed")
-        }
+    static func tryCapture() -> NSImage? {
+        guard let displayID = NSScreen.main?.displayID else { return nil }
+        guard let cgImage = CGDisplayCreateImage(displayID) else { return nil }
         let size = NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
-        return .image(NSImage(cgImage: cgImage, size: size))
+        return NSImage(cgImage: cgImage, size: size)
+    }
+
+    @MainActor
+    static func captureWithPermission() async -> PawbotScreenCaptureResult {
+        if let image = tryCapture() {
+            return .image(image)
+        }
+        CGRequestScreenCaptureAccess()
+        try? await Task.sleep(for: .milliseconds(500))
+        if let image = tryCapture() {
+            return .image(image)
+        }
+        return .denied
     }
 }
 
