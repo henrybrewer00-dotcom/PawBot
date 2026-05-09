@@ -33,11 +33,6 @@ runBtn.addEventListener("click", async () => {
     taskEl.focus();
     return;
   }
-  const stored = await chrome.storage.local.get(["xaiKey"]);
-  if (!stored.xaiKey) {
-    appendLog("Add your xAI Grok key in Settings first.", "error");
-    return;
-  }
 
   setRunning(true);
   appendLog(`You: ${task}`);

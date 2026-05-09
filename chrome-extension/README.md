@@ -11,11 +11,15 @@ file and adapt it.
 
 ## Load it in Chrome
 
-1. Open `chrome://extensions`.
-2. Turn on **Developer mode** (top right).
-3. Click **Load unpacked** and pick this `chrome-extension/` folder.
-4. Click the Pawbot icon in the toolbar → **⚙ Settings** → paste your xAI
-   Grok API key (get one at https://console.x.ai). Save.
+1. Make sure the Pawbot backend is running: `cd backend && npm run dev`
+   (the extension reads the xAI key from the backend so you don't have to
+   paste it into Chrome).
+2. Open `chrome://extensions`.
+3. Turn on **Developer mode** (top right).
+4. Click **Load unpacked** and pick this `chrome-extension/` folder.
+5. Click the Pawbot icon → ⚙ to verify "Connected" status — that means
+   the extension successfully fetched the key from
+   `http://localhost:4000/api/credentials/xai`.
 
 ## Use it
 
@@ -65,12 +69,17 @@ Examples that work:
 - If a verification code is needed, prefer `get_latest_email_code` over
   guessing.
 
-## Hooking up to the Pawbot Mac app (later)
+## Where the API key comes from
 
-Right now the extension reads its API key from `chrome.storage.local`. A
-follow-up could have the Mac app expose the key on `http://localhost:4000`
-and the extension's options page fetch it instead — keeps a single source
-of truth across both surfaces.
+The extension never stores or asks for an xAI key. On every run it fetches
+`GET http://localhost:4000/api/credentials/xai` from the Pawbot backend,
+which reads `XAI_API_KEY` from `backend/.env`. That endpoint is hard-locked
+to localhost requests and disabled when running on Vercel / production. The
+key is cached in the service worker for 5 minutes between runs.
+
+If the backend isn't up the extension can't run — tell the user via a
+clear chat message ("Make sure the Pawbot Mac app is running and the
+backend is up").
 
 ## Known limitations
 

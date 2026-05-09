@@ -139,6 +139,27 @@ const MAX_ITERATIONS = 30;
 const SCREENSHOT_MAX_WIDTH = 1280;
 const SCREENSHOTS_TO_KEEP = 2; // images cost tokens, prune older ones
 
+const PAWBOT_BACKEND_URL = "http://localhost:4000";
+let cachedXaiKey = null;
+let cachedXaiKeyAt = 0;
+
+async function loadXaiKey() {
+  const now = Date.now();
+  if (cachedXaiKey && (now - cachedXaiKeyAt) < 5 * 60 * 1000) return cachedXaiKey;
+  try {
+    const res = await fetch(`${PAWBOT_BACKEND_URL}/api/credentials/xai`, { cache: "no-store" });
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.key) {
+        cachedXaiKey = data.key;
+        cachedXaiKeyAt = now;
+        return cachedXaiKey;
+      }
+    }
+  } catch {}
+  return null;
+}
+
 let activeRun = null;
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -167,8 +188,10 @@ chrome.runtime.onConnect.addListener((port) => {
 // Agent loop
 // =============================
 async function runAgent(task, port, isStopped) {
-  const { xaiKey } = await chrome.storage.local.get(["xaiKey"]);
-  if (!xaiKey) throw new Error("Missing xAI key. Open Settings.");
+  const xaiKey = await loadXaiKey();
+  if (!xaiKey) {
+    throw new Error("Couldn't get an xAI key from the Pawbot backend. Make sure the Pawbot Mac app is running and the backend is up (cd backend && npm run dev).");
+  }
 
   port.postMessage({ type: "status", text: "Looking at your browser…" });
 

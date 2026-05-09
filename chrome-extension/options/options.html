@@ -13,52 +13,61 @@
       margin: 0 auto;
     }
     h1 { margin-top: 0; }
-    label {
-      display: block;
-      font-weight: 700;
-      margin-bottom: 6px;
-      font-size: 14px;
+    .card {
+      background: white;
+      border-radius: 14px;
+      padding: 18px;
+      margin-bottom: 14px;
+      border: 1px solid rgba(37, 99, 235, 0.18);
     }
-    input[type="text"], input[type="password"] {
-      width: 100%;
-      padding: 10px 12px;
-      border-radius: 10px;
-      border: 1.5px solid rgba(37, 99, 235, 0.25);
-      font-size: 14px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    .row { display: flex; align-items: center; gap: 12px; }
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #9ca3af;
     }
+    .dot.ok { background: #16a34a; }
+    .dot.bad { background: #dc2626; }
+    .help { font-size: 13px; color: #4b5563; margin: 8px 0 0; }
     button {
-      margin-top: 16px;
-      padding: 10px 18px;
+      margin-top: 4px;
+      padding: 8px 14px;
       border-radius: 10px;
-      border: none;
-      background: #2563eb;
-      color: white;
+      border: 1px solid rgba(37, 99, 235, 0.3);
+      background: white;
       font-weight: 700;
-      font-size: 14px;
+      font-size: 13px;
       cursor: pointer;
     }
-    .help {
+    code {
+      background: rgba(37, 99, 235, 0.07);
+      padding: 1px 6px;
+      border-radius: 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 13px;
-      color: #4b5563;
-      margin-top: 8px;
-    }
-    .ok {
-      color: #166534;
-      font-weight: 700;
     }
   </style>
 </head>
 <body>
-  <h1>Pawbot Browser Settings</h1>
-  <p>Add your xAI Grok API key. The key stays only on this Chrome profile and is never sent anywhere except to api.x.ai.</p>
+  <h1>Pawbot Browser</h1>
+  <p>This extension gets its xAI Grok key from the Pawbot backend (no key entry needed). Make sure the Pawbot Mac app is running and the backend is up.</p>
 
-  <label for="key">xAI API key</label>
-  <input id="key" type="password" placeholder="xai-..." autocomplete="off" />
-  <p class="help">Get one at <a href="https://console.x.ai" target="_blank">console.x.ai</a> if you don't have one.</p>
+  <div class="card">
+    <div class="row">
+      <div id="status-dot" class="dot"></div>
+      <strong id="status-text">Checking backend…</strong>
+    </div>
+    <p class="help" id="status-detail">Looking for a key at <code>http://localhost:4000/api/credentials/xai</code></p>
+    <button id="recheck">Check again</button>
+  </div>
 
-  <button id="save">Save</button>
-  <span id="status" class="ok" style="margin-left:12px"></span>
+  <div class="card">
+    <strong>Backend not running?</strong>
+    <p class="help">In a terminal: <code>cd backend &amp;&amp; npm run dev</code></p>
+    <p class="help">The key lives in <code>backend/.env</code> as <code>XAI_API_KEY</code>.</p>
+  </div>
 
   <script src="options.js"></script>
 </body>

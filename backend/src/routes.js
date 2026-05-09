@@ -381,5 +381,24 @@ export function createRouter(store) {
     res.json({ briefs: listMorningBriefs() });
   });
 
+  router.get("/api/credentials/xai", (req, res) => {
+    if (process.env.VERCEL || process.env.NODE_ENV === "production") {
+      res.status(403).json({ error: "credentials endpoint is disabled in production" });
+      return;
+    }
+    const host = req.hostname || "";
+    const isLocal = host === "localhost" || host === "127.0.0.1" || host.startsWith("::1") || host === "[::1]";
+    if (!isLocal) {
+      res.status(403).json({ error: "credentials endpoint only available on localhost" });
+      return;
+    }
+    const key = process.env.XAI_API_KEY ?? null;
+    if (!key) {
+      res.status(404).json({ error: "XAI_API_KEY not set in backend/.env" });
+      return;
+    }
+    res.json({ key, source: "backend/.env" });
+  });
+
   return router;
 }

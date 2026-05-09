@@ -1,21 +1,33 @@
-const keyInput = document.getElementById("key");
-const saveBtn = document.getElementById("save");
-const statusEl = document.getElementById("status");
+const dot = document.getElementById("status-dot");
+const text = document.getElementById("status-text");
+const detail = document.getElementById("status-detail");
+const recheck = document.getElementById("recheck");
 
-(async () => {
-  const stored = await chrome.storage.local.get(["xaiKey"]);
-  if (stored.xaiKey) keyInput.value = stored.xaiKey;
-})();
-
-saveBtn.addEventListener("click", async () => {
-  const v = keyInput.value.trim();
-  if (!v) {
-    statusEl.textContent = "Paste a key first.";
-    statusEl.style.color = "#991b1b";
-    return;
+async function check() {
+  dot.className = "dot";
+  text.textContent = "Checking…";
+  detail.textContent = "Asking the Pawbot backend for the xAI key…";
+  try {
+    const res = await fetch("http://localhost:4000/api/credentials/xai", { cache: "no-store" });
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.key) {
+        dot.className = "dot ok";
+        text.textContent = "Connected";
+        detail.textContent = `Key loaded from ${data.source ?? "backend"}. Ready to go.`;
+        return;
+      }
+    }
+    const err = await res.text();
+    dot.className = "dot bad";
+    text.textContent = `Backend up, but no key (HTTP ${res.status})`;
+    detail.textContent = err.slice(0, 200);
+  } catch (e) {
+    dot.className = "dot bad";
+    text.textContent = "Backend isn't reachable";
+    detail.textContent = "Start it with: cd backend && npm run dev";
   }
-  await chrome.storage.local.set({ xaiKey: v });
-  statusEl.textContent = "Saved!";
-  statusEl.style.color = "#166534";
-  setTimeout(() => { statusEl.textContent = ""; }, 2000);
-});
+}
+
+recheck.addEventListener("click", check);
+check();
