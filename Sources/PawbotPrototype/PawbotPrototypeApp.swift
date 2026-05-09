@@ -95,6 +95,7 @@ final class PawbotModel: ObservableObject {
         fontScale = 1.0
         screenshotPollingTask?.cancel()
         screenshotPollingTask = nil
+        PawbotConsent.userConsentedThisSession = false
         Task { await PawbotAI.shared.resetHistory() }
     }
 
@@ -262,10 +263,25 @@ final class PawbotModel: ObservableObject {
         }
     }
 
-    func lookAtScreen(prompt customPrompt: String? = nil) {
+    func lookAtScreen(prompt customPrompt: String? = nil, skipConsent: Bool = false) {
         if !hasStartedConversation {
             withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
         }
+
+        if !skipConsent && !PawbotConsent.userConsentedThisSession {
+            isPawbotThinking = false
+            Task { @MainActor in
+                let approved = await PawbotConsent.askToLookAtScreen()
+                if approved {
+                    PawbotConsent.userConsentedThisSession = true
+                    self.lookAtScreen(prompt: customPrompt, skipConsent: true)
+                } else {
+                    self.appendBot("Okay — I won't look at the screen. Just say the word when you change your mind.")
+                }
+            }
+            return
+        }
+
         if !isPawbotThinking { isPawbotThinking = true }
 
         let basePrompt = "I'm helping an older adult use their computer. In 2-3 short, friendly sentences, plainly describe what's on their screen and what they might want help with. No jargon."
@@ -912,8 +928,8 @@ actor PawbotAI {
     private let session: URLSession
     private let apiKey: String?
     private let endpoint = URL(string: "https://api.x.ai/v1/chat/completions")!
-    private let textModelCandidates = ["grok-2-latest", "grok-3-latest", "grok-3", "grok-beta"]
-    private let visionModelCandidates = ["grok-2-vision-latest", "grok-3-vision-latest", "grok-vision-beta", "grok-2-vision-1212"]
+    private let textModelCandidates = ["grok-4-fast-non-reasoning", "grok-4-0709", "grok-3", "grok-3-mini", "grok-2-latest"]
+    private let visionModelCandidates = ["grok-4-fast-non-reasoning", "grok-4-0709", "grok-4-fast-reasoning"]
     private var cachedTextModel: String?
     private var cachedVisionModel: String?
     private var discoveredModels: [String]?
@@ -1052,7 +1068,8 @@ actor PawbotAI {
         let discovered = await discoverModels()
         let visionFromDiscovery = discovered.filter { id in
             let lower = id.lowercased()
-            return lower.contains("vision") || lower.contains("image")
+            if lower.contains("imagine") || lower.contains("video") || lower.contains("code-fast") { return false }
+            return lower.contains("vision") || lower.contains("grok-4")
         }
         var order = (cachedVisionModel.map { [$0] } ?? [])
         for m in visionFromDiscovery where !order.contains(m) { order.append(m) }
@@ -1114,6 +1131,24 @@ private final class SpeechFinishObserver: NSObject, AVSpeechSynthesizerDelegate,
     }
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         onFinish()
+    }
+}
+
+enum PawbotConsent {
+    @MainActor static var userConsentedThisSession = false
+
+    @MainActor
+    static func askToLookAtScreen() async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Let Pawbot look at your screen?"
+        alert.informativeText = "Pawbot will take a quick screenshot of your main display so it can read and explain what's on it. The screenshot is sent to Grok and never saved."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Reject")
+        if let icon = NSImage(systemSymbolName: "eye.fill", accessibilityDescription: nil) {
+            alert.icon = icon
+        }
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }
 
