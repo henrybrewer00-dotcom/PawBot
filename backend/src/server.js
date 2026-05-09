@@ -24,30 +24,41 @@ app.use((error, req, res, next) => {
   });
 });
 
-app.listen(config.port, () => {
-  console.log(`PawBot backend listening on http://localhost:${config.port}`);
+// Vercel serverless — export the app, don't listen
+if (process.env.VERCEL) {
   if (config.tensorlake.apiKey) {
-    console.log("Medication agent running in Tensorlake");
-  } else {
-    console.log(`Medication agent polling every ${config.agent.pollSeconds}s`);
-  }
-  console.log(`Hyperspell sync polling every ${config.hyperspell.syncHours}h`);
-});
-
-if (config.tensorlake.apiKey) {
-  startTensorlakeAgents().catch((error) => {
-    console.error("Tensorlake agent launch failed", error);
-  });
-} else {
-  setInterval(() => {
-    runMedicationAgentTick(store).catch((error) => {
-      console.error("Medication agent tick failed", error);
+    startTensorlakeAgents().catch((error) => {
+      console.error("Tensorlake agent launch failed", error);
     });
-  }, config.agent.pollSeconds * 1000);
+  }
+} else {
+  app.listen(config.port, () => {
+    console.log(`PawBot backend listening on http://localhost:${config.port}`);
+    if (config.tensorlake.apiKey) {
+      console.log("Medication agent running in Tensorlake");
+    } else {
+      console.log(`Medication agent polling every ${config.agent.pollSeconds}s`);
+    }
+    console.log(`Hyperspell sync polling every ${config.hyperspell.syncHours}h`);
+  });
+
+  if (config.tensorlake.apiKey) {
+    startTensorlakeAgents().catch((error) => {
+      console.error("Tensorlake agent launch failed", error);
+    });
+  } else {
+    setInterval(() => {
+      runMedicationAgentTick(store).catch((error) => {
+        console.error("Medication agent tick failed", error);
+      });
+    }, config.agent.pollSeconds * 1000);
+  }
+
+  setInterval(() => {
+    runHyperspellSyncTick(store).catch((error) => {
+      console.error("Hyperspell sync tick failed", error);
+    });
+  }, config.hyperspell.syncHours * 60 * 60 * 1000);
 }
 
-setInterval(() => {
-  runHyperspellSyncTick(store).catch((error) => {
-    console.error("Hyperspell sync tick failed", error);
-  });
-}, config.hyperspell.syncHours * 60 * 60 * 1000);
+export default app;
