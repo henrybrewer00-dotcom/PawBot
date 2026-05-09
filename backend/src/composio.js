@@ -38,21 +38,57 @@ export async function composioExecute(actionName, input = {}, opts = {}) {
   return parsed;
 }
 
+function findArray(obj, keys, depth = 0) {
+  if (!obj || typeof obj !== "object" || depth > 6) return null;
+  for (const k of keys) {
+    if (Array.isArray(obj[k])) return obj[k];
+  }
+  for (const v of Object.values(obj)) {
+    if (v && typeof v === "object") {
+      const found = findArray(v, keys, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function pickField(obj, candidates) {
+  for (const path of candidates) {
+    const parts = path.split(".");
+    let cur = obj;
+    let ok = true;
+    for (const p of parts) {
+      if (cur && typeof cur === "object" && p in cur) cur = cur[p];
+      else { ok = false; break; }
+    }
+    if (ok && cur != null && cur !== "") return cur;
+  }
+  return null;
+}
+
+function pickHeader(message, name) {
+  const headers = message.payload?.headers ?? message.headers ?? [];
+  if (!Array.isArray(headers)) return null;
+  const lower = name.toLowerCase();
+  const hit = headers.find((h) => (h?.name ?? h?.Name ?? "").toLowerCase() === lower);
+  return hit?.value ?? hit?.Value ?? null;
+}
+
 export async function fetchGmailRecent(limit = 5) {
   const result = await composioExecute("GMAIL_FETCH_EMAILS", {
     max_results: limit,
     query: "in:inbox",
     verbose: true
   });
-  const data = result.data ?? result.response_data ?? result;
-  const list = data.messages ?? data.results ?? data.emails ?? [];
-  return list.map((m) => ({
-    id: m.id ?? m.messageId ?? m.thread_id ?? "",
-    from: m.from ?? m.sender ?? m.payload?.headers?.find?.((h) => h.name === "From")?.value ?? "Unknown",
-    subject: m.subject ?? m.payload?.headers?.find?.((h) => h.name === "Subject")?.value ?? "(no subject)",
-    snippet: m.snippet ?? m.preview ?? m.body?.text ?? "",
-    date: m.date ?? m.receivedAt ?? m.payload?.headers?.find?.((h) => h.name === "Date")?.value ?? null
-  })).filter((m) => m.id);
+  const list = findArray(result, ["messages", "emails", "results", "items"]) ?? [];
+  const mapped = list.map((m) => ({
+    id: pickField(m, ["id", "messageId", "message_id", "thread_id", "threadId"]) ?? "",
+    from: pickField(m, ["from", "sender", "fromEmail", "from_email"]) ?? pickHeader(m, "From") ?? "Unknown",
+    subject: pickField(m, ["subject", "Subject", "title"]) ?? pickHeader(m, "Subject") ?? "(no subject)",
+    snippet: pickField(m, ["snippet", "preview", "messageText", "message_text", "body.text", "bodyText", "body"]) ?? "",
+    date: pickField(m, ["date", "receivedAt", "messageTimestamp", "internalDate", "timestamp"]) ?? pickHeader(m, "Date") ?? null
+  })).filter((m) => m.id || m.subject !== "(no subject)");
+  return mapped;
 }
 
 export async function fetchCalendarUpcoming(limit = 5) {
@@ -63,14 +99,17 @@ export async function fetchCalendarUpcoming(limit = 5) {
     order_by: "startTime",
     timeMin: new Date().toISOString()
   });
-  const data = result.data ?? result.response_data ?? result;
-  const list = data.items ?? data.events ?? [];
+  const list = findArray(result, ["items", "events", "results", "eventList"]) ?? [];
   return list.map((e) => ({
-    id: e.id ?? "",
-    title: e.summary ?? e.title ?? "(no title)",
-    start: e.start?.dateTime ?? e.start?.date ?? null,
-    end: e.end?.dateTime ?? e.end?.date ?? null,
-    location: e.location ?? null,
-    description: e.description ?? null
-  })).filter((e) => e.id);
+    id: pickField(e, ["id", "eventId", "event_id"]) ?? "",
+    title: pickField(e, ["summary", "title", "eventName", "event_name"]) ?? "(no title)",
+    start: pickField(e, ["start.dateTime", "start.date", "startTime", "start_time", "start"]) ?? null,
+    end: pickField(e, ["end.dateTime", "end.date", "endTime", "end_time", "end"]) ?? null,
+    location: pickField(e, ["location", "venue"]) ?? null,
+    description: pickField(e, ["description", "notes"]) ?? null
+  })).filter((e) => e.id || e.title !== "(no title)");
+}
+
+export async function probeRaw(action, input) {
+  return composioExecute(action, input);
 }

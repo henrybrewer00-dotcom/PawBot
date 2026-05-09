@@ -25,8 +25,9 @@ import {
   updateMedication
 } from "./domain.js";
 import { searchSeniorMemory } from "./nia.js";
-import { fetchGmailRecent, fetchCalendarUpcoming, isComposioConfigured } from "./composio.js";
+import { fetchGmailRecent, fetchCalendarUpcoming, isComposioConfigured, probeRaw } from "./composio.js";
 import { listScamAlerts, dismissScamAlert, scannerStatus } from "./scamScanner.js";
+import { generateMorningBrief, getCachedMorningBrief, listMorningBriefs } from "./morningBrief.js";
 import { createUserToken, getConnectUrl, HYPERSPELL_PROVIDERS } from "./hyperspell.js";
 import {
   normalizeHyperspellProvider,
@@ -338,6 +339,39 @@ export function createRouter(store) {
   router.post("/api/scam-alerts/:id/dismiss", (req, res) => {
     const ok = dismissScamAlert(req.params.id);
     res.json({ ok });
+  });
+
+  router.get("/api/composio/probe/:action", asyncHandler(async (req, res) => {
+    if (!isComposioConfigured()) {
+      res.status(503).json({ error: "composio_not_configured" });
+      return;
+    }
+    const action = req.params.action;
+    const inputBlob = req.query.input ? JSON.parse(req.query.input) : {};
+    try {
+      const raw = await probeRaw(action, inputBlob);
+      res.json({ action, input: inputBlob, raw });
+    } catch (err) {
+      res.status(502).json({ error: err.message, body: err.body ?? null });
+    }
+  }));
+
+  router.get("/api/morning-brief", asyncHandler(async (req, res) => {
+    const force = req.query.force === "true";
+    try {
+      const brief = await generateMorningBrief({ force });
+      res.json(brief);
+    } catch (err) {
+      throw new HttpError(502, err.message);
+    }
+  }));
+
+  router.get("/api/morning-brief/today", (req, res) => {
+    res.json(getCachedMorningBrief() ?? { brief: null });
+  });
+
+  router.get("/api/morning-brief/history", (req, res) => {
+    res.json({ briefs: listMorningBriefs() });
   });
 
   return router;

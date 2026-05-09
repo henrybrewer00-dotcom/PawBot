@@ -59,12 +59,17 @@ final class PawbotModel: ObservableObject {
     @Published var isGmailLoading = false
     @Published var showCalendarPopover = false
     @Published var showGmailPopover = false
+    @Published var showBriefPopover = false
+    @Published var morningBriefHistory: [PawbotMorningBrief] = []
+    @Published var morningBriefLoadingError: String?
+    @Published var isMorningBriefLoading = false
 
     private let speech = PawbotSpeech()
     private let voice = PawbotVoiceInput()
     private var screenshotPollingTask: Task<Void, Never>?
     private var scamPollTask: Task<Void, Never>?
     private var seenScamIDs: Set<String> = []
+    private var lastShownBriefDate: String?
 
     let actions = [
         PawbotAction(title: "Explain my screen", subtitle: "See and explain it plainly", icon: "eye.fill", color: .orange),
@@ -376,6 +381,7 @@ final class PawbotModel: ObservableObject {
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(2))
             await self?.pollScamAlerts()
+            self?.maybeShowMorningBrief()
         }
     }
 
@@ -455,6 +461,88 @@ final class PawbotModel: ObservableObject {
     func toggleGmailPopover() {
         showGmailPopover.toggle()
         if showGmailPopover { loadGmailPreview() }
+    }
+
+    func toggleBriefPopover() {
+        showBriefPopover.toggle()
+        if showBriefPopover { loadMorningBriefHistory() }
+    }
+
+    func showMorningBrief(force: Bool = false) {
+        if !hasStartedConversation {
+            withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
+        }
+        isPawbotThinking = true
+        Task { @MainActor in
+            do {
+                let brief = try await PawbotBackend.shared.morningBrief(force: force)
+                isPawbotThinking = false
+                guard let text = brief.brief, !text.isEmpty else {
+                    appendBot("I couldn't put together a brief just yet. Try again in a moment.")
+                    return
+                }
+                appendBot("☀️ Good morning — here's your brief:\n\n\(text)")
+                lastShownBriefDate = brief.date
+                Task { await PawbotAI.shared.recordExchange(
+                    user: "[Pawbot delivered the morning brief]",
+                    assistant: text
+                ) }
+            } catch let error as PawbotBackendError {
+                isPawbotThinking = false
+                appendBot(error.errorDescription ?? "Couldn't reach the morning brief.")
+            } catch {
+                isPawbotThinking = false
+                appendBot("Couldn't load the morning brief: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func loadMorningBriefHistory() {
+        isMorningBriefLoading = true
+        morningBriefLoadingError = nil
+        Task { @MainActor in
+            do {
+                morningBriefHistory = try await PawbotBackend.shared.morningBriefHistory()
+                isMorningBriefLoading = false
+            } catch let error as PawbotBackendError {
+                isMorningBriefLoading = false
+                morningBriefLoadingError = error.errorDescription
+            } catch {
+                isMorningBriefLoading = false
+                morningBriefLoadingError = error.localizedDescription
+            }
+        }
+    }
+
+    private func todayDateString() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
+    }
+
+    private func maybeShowMorningBrief() {
+        let today = todayDateString()
+        guard lastShownBriefDate != today else { return }
+        let hour = Calendar.current.component(.hour, from: Date())
+        guard hour >= 6 && hour < 12 else { return }
+        Task { @MainActor in
+            do {
+                let brief = try await PawbotBackend.shared.morningBrief(force: false)
+                guard let text = brief.brief, !text.isEmpty else { return }
+                guard brief.date == today else { return }
+                guard lastShownBriefDate != brief.date else { return }
+                lastShownBriefDate = brief.date
+                if !hasStartedConversation {
+                    withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
+                }
+                appendBot("☀️ Good morning — here's your brief:\n\n\(text)")
+                PawbotNotifier.notify(title: "Good morning ☀️", body: "Pawbot has your morning brief ready.")
+                Task { await PawbotAI.shared.recordExchange(
+                    user: "[Pawbot delivered the morning brief]",
+                    assistant: text
+                ) }
+            } catch { /* silent */ }
+        }
     }
 
     private func startScreenshotPolling(retryPrompt: String?) {
@@ -807,6 +895,27 @@ struct PawbotRootView: View {
                 .help("Back to home")
 
                 Spacer()
+
+                Button(action: model.toggleBriefPopover) {
+                    Image(systemName: "sun.max.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.orange)
+                        .frame(width: 38, height: 38)
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Morning brief")
+                .popover(isPresented: $model.showBriefPopover, arrowEdge: .bottom) {
+                    MorningBriefPopover(
+                        history: model.morningBriefHistory,
+                        isLoading: model.isMorningBriefLoading,
+                        error: model.morningBriefLoadingError,
+                        onShowToday: {
+                            model.showBriefPopover = false
+                            model.showMorningBrief()
+                        },
+                        onRefresh: model.loadMorningBriefHistory
+                    )
+                }
 
                 Button(action: model.toggleCalendarPopover) {
                     Image(systemName: "calendar")
@@ -1568,6 +1677,18 @@ struct PawbotScamAlertsResponse: Decodable {
     let alerts: [PawbotScamAlert]
 }
 
+struct PawbotMorningBrief: Decodable {
+    let date: String
+    let generatedAt: String?
+    let brief: String?
+    let eventsCount: Int?
+    let emailsCount: Int?
+}
+
+struct PawbotMorningBriefHistory: Decodable {
+    let briefs: [PawbotMorningBrief]
+}
+
 enum PawbotBackendError: Error, LocalizedError {
     case notRunning
     case gmailNotConfigured
@@ -1632,6 +1753,15 @@ actor PawbotBackend {
         request.httpMethod = "POST"
         request.timeoutInterval = 6
         _ = try? await URLSession.shared.data(for: request)
+    }
+
+    func morningBrief(force: Bool = false) async throws -> PawbotMorningBrief {
+        try await get("/api/morning-brief", query: force ? [URLQueryItem(name: "force", value: "true")] : [], notConfiguredError: .notRunning)
+    }
+
+    func morningBriefHistory() async throws -> [PawbotMorningBrief] {
+        let resp: PawbotMorningBriefHistory = try await get("/api/morning-brief/history", notConfiguredError: .notRunning)
+        return resp.briefs
     }
 }
 
@@ -2010,6 +2140,88 @@ struct CalendarPreviewSheet: View {
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+}
+
+struct MorningBriefPopover: View {
+    let history: [PawbotMorningBrief]
+    let isLoading: Bool
+    let error: String?
+    let onShowToday: () -> Void
+    let onRefresh: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "sun.max.fill")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.orange)
+                Text("Morning briefs")
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                Spacer()
+                Button(action: onRefresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .bold))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button(action: onShowToday) {
+                HStack {
+                    Image(systemName: "sparkles")
+                    Text("Show today's brief")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                }
+                .padding(.horizontal, 14)
+                .frame(height: 40)
+                .frame(maxWidth: .infinity)
+                .background(Color.orange.opacity(0.95), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+
+            Divider()
+
+            Text("Past briefs")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.secondary)
+
+            if isLoading {
+                Text("Loading…")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+            } else if let error {
+                Text(error)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if history.isEmpty {
+                Text("No briefs yet — Pawbot creates one each morning at 7 AM.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(history, id: \.date) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.date)
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(.orange)
+                                Text(item.brief ?? "")
+                                    .font(.system(size: 13))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                    }
+                }
+                .frame(maxHeight: 260)
+            }
+        }
+        .padding(16)
+        .frame(width: 360)
     }
 }
 

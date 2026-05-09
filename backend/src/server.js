@@ -8,6 +8,7 @@ import { runHyperspellSyncTick } from "./hyperspellSync.js";
 import { startTensorlakeAgents } from "./tensorlakeRunner.js";
 import { startScamScanner } from "./scamScanner.js";
 import { isComposioConfigured } from "./composio.js";
+import { scheduleMorningBrief } from "./morningBrief.js";
 
 const app = express();
 
@@ -64,9 +65,10 @@ if (process.env.VERCEL) {
 
   if (isComposioConfigured()) {
     startScamScanner();
-    console.log("Scam scanner running every 5m via Composio + Grok");
+    scheduleMorningBrief();
+    console.log("Scam scanner running every 5m + morning brief scheduled for 7am via Composio + Grok");
   } else {
-    console.log("Composio not configured — scam scanner idle (set COMPOSIO_API_KEY in backend/.env)");
+    console.log("Composio not configured — scam scanner / morning brief idle (set COMPOSIO_API_KEY in backend/.env)");
   }
 }
 
