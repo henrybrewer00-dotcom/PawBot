@@ -5,7 +5,7 @@ const NAV_ITEMS = [
   { id: 'alerts',        icon: '🛡', label: 'Alerts & Memory' },
 ]
 
-export default function Sidebar({ currentPage, onNavigate }) {
+export default function Sidebar({ currentPage, onNavigate, onLogout }) {
   return (
     <>
       <aside className="sidebar">
@@ -26,6 +26,12 @@ export default function Sidebar({ currentPage, onNavigate }) {
             </button>
           ))}
         </nav>
+        <div className="sidebar-footer">
+          <button className="nav-item" onClick={onLogout} title="Sign out">
+            <span className="nav-icon">↩</span>
+            <span className="nav-label">Sign out</span>
+          </button>
+        </div>
       </aside>
       <style>{`
         .sidebar {
@@ -78,6 +84,11 @@ export default function Sidebar({ currentPage, onNavigate }) {
           gap: 3px;
           padding: 0 8px;
           flex: 1;
+        }
+        .sidebar-footer {
+          padding: 0 8px;
+          border-top: 1px solid var(--border);
+          padding-top: 10px;
         }
         .nav-item {
           width: 100%;

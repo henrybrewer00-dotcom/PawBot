@@ -7,9 +7,10 @@ export async function api(path, options = {}) {
 
   const headers = { 'Content-Type': 'application/json' };
   try {
-    const { data } = await insforge.auth.getCurrentUser()
-    if (data?.session?.accessToken) {
-      headers['Authorization'] = `Bearer ${data.session.accessToken}`
+    await insforge.auth.getCurrentUser()
+    const accessToken = insforge.tokenManager?.getAccessToken?.()
+    if (accessToken) {
+      headers['Authorization'] = `Bearer ${accessToken}`
     }
   } catch {
     // no session — send request without auth header

@@ -1,9 +1,5 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import test from "node:test";
-import { JsonStore } from "../src/store.js";
 import {
   createMedication,
   createUser,
@@ -12,6 +8,44 @@ import {
   linkCaretakerToSenior,
   runMedicationAgentTick
 } from "../src/domain.js";
+
+const emptyState = () => ({
+  users: [],
+  careRelationships: [],
+  medications: [],
+  medicationLogs: [],
+  calendarEvents: [],
+  scamAlerts: [],
+  agentLogs: [],
+  hyperspellConnections: []
+});
+
+class MemoryStore {
+  constructor() {
+    this.state = emptyState();
+  }
+
+  async all(collection) {
+    return this.state[collection] ?? [];
+  }
+
+  async find(collection, predicate) {
+    return (await this.all(collection)).find(predicate) ?? null;
+  }
+
+  async insert(collection, item) {
+    this.state[collection].push(item);
+    return item;
+  }
+
+  async update(collection, id, changes) {
+    const items = await this.all(collection);
+    const index = items.findIndex((item) => item.id === id);
+    if (index === -1) return null;
+    items[index] = { ...items[index], ...changes };
+    return items[index];
+  }
+}
 
 function currentLocalTime(timeZone) {
   return new Intl.DateTimeFormat("en-GB", {
@@ -23,11 +57,10 @@ function currentLocalTime(timeZone) {
 }
 
 test("medication reminder can be sent and confirmed by inbound text", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pawbot-test-"));
-  const store = new JsonStore(path.join(tempDir, "db.json"));
+  const store = new MemoryStore();
   const timeZone = "America/Los_Angeles";
 
-  const caretaker = createUser(store, {
+  const caretaker = await createUser(store, {
     name: "Demo Caretaker",
     phone: "+15550000002",
     email: "caretaker@example.com",
@@ -35,7 +68,7 @@ test("medication reminder can be sent and confirmed by inbound text", async () =
     timezone: timeZone
   });
 
-  const senior = createUser(store, {
+  const senior = await createUser(store, {
     name: "Demo Senior",
     phone: "+15550000001",
     email: "senior@example.com",
@@ -43,12 +76,12 @@ test("medication reminder can be sent and confirmed by inbound text", async () =
     timezone: timeZone
   });
 
-  linkCaretakerToSenior(store, {
+  await linkCaretakerToSenior(store, {
     caretakerId: caretaker.id,
     seniorId: senior.id
   });
 
-  createMedication(store, {
+  await createMedication(store, {
     seniorId: senior.id,
     createdBy: caretaker.id,
     name: "Vitamin D",
@@ -58,7 +91,7 @@ test("medication reminder can be sent and confirmed by inbound text", async () =
   });
 
   const tickResults = await runMedicationAgentTick(store);
-  const sentStatus = getTodayMedicationStatus(store, senior.id);
+  const sentStatus = await getTodayMedicationStatus(store, senior.id);
 
   assert.equal(tickResults.length, 1);
   assert.equal(sentStatus[0].status, "sent");
@@ -67,7 +100,7 @@ test("medication reminder can be sent and confirmed by inbound text", async () =
     from_number: senior.phone,
     content: "DONE"
   });
-  const takenStatus = getTodayMedicationStatus(store, senior.id);
+  const takenStatus = await getTodayMedicationStatus(store, senior.id);
 
   assert.equal(reply.matched, true);
   assert.equal(takenStatus[0].status, "taken");

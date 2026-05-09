@@ -8,13 +8,14 @@ import { minutesBetween, scheduledIsoForLocalTime, toDateKey, toLocalTime } from
 
 const TAKEN_REPLIES = new Set(["YES", "Y", "DONE", "TAKEN", "TOOK IT", "TAKE"]);
 
-export async function createUser(store, { name, phone, email, role, timezone = "America/Los_Angeles" }) {
+export async function createUser(store, { name, phone, email, role, timezone = "America/Los_Angeles", authUserId = null }) {
   if (!["senior", "caretaker"].includes(role)) {
     throw new HttpError(400, "role must be senior or caretaker");
   }
 
   return store.insert("users", {
     id: createId("user"),
+    authUserId,
     name,
     phone,
     email,
@@ -22,6 +23,62 @@ export async function createUser(store, { name, phone, email, role, timezone = "
     timezone,
     createdAt: new Date().toISOString()
   });
+}
+
+export async function getAccountProfile(store, authUser) {
+  const account = await store.find("users", (user) => user.authUserId === authUser.id);
+  if (!account) return null;
+
+  if (account.role === "senior") {
+    return {
+      account,
+      seniorId: account.id,
+      seniors: [account]
+    };
+  }
+
+  const relationships = (await store.all("careRelationships"))
+    .filter((relationship) => relationship.caretakerId === account.id);
+  const seniors = (await Promise.all(
+    relationships.map((relationship) => store.find("users", (user) => user.id === relationship.seniorId))
+  )).filter(Boolean);
+
+  return {
+    account,
+    seniorId: seniors[0]?.id ?? null,
+    seniors
+  };
+}
+
+export async function upsertAccountProfile(store, authUser, body) {
+  const role = body.role;
+  if (!["senior", "caretaker"].includes(role)) {
+    throw new HttpError(400, "role must be senior or caretaker");
+  }
+
+  const existing = await store.find("users", (user) => user.authUserId === authUser.id);
+  const email = authUser.email ?? body.email;
+  if (!email) throw new HttpError(400, "Authenticated user is missing an email address");
+
+  if (existing) {
+    const updated = await store.update("users", existing.id, {
+      name: body.name ?? existing.name,
+      phone: body.phone ?? existing.phone,
+      timezone: body.timezone ?? existing.timezone
+    });
+    return getAccountProfile(store, { ...authUser, id: updated.authUserId });
+  }
+
+  await createUser(store, {
+    authUserId: authUser.id,
+    name: body.name,
+    phone: body.phone,
+    email,
+    role,
+    timezone: body.timezone ?? "America/Los_Angeles"
+  });
+
+  return getAccountProfile(store, authUser);
 }
 
 export async function linkCaretakerToSenior(store, { caretakerId, seniorId, permissionLevel = "manager" }) {

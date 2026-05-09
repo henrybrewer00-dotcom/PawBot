@@ -4,7 +4,7 @@ import { api } from '../api.js'
 import StatusPill from '../components/StatusPill.jsx'
 
 export default function Medications() {
-  const { seniorId, toast } = useApp()
+  const { seniorId, account, toast } = useApp()
   const [meds, setMeds]           = useState([])
   const [loading, setLoading]     = useState(true)
   const [editingId, setEditingId] = useState(null)
@@ -55,7 +55,7 @@ export default function Medications() {
     try {
       const med = await api('/api/medications', {
         method: 'POST',
-        body: { seniorId, createdBy: seniorId, ...data },
+        body: { seniorId, createdBy: account?.id ?? seniorId, ...data },
       })
       setMeds(prev => [...prev, med])
       setShowAdd(false)

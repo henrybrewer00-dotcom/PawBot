@@ -1,7 +1,8 @@
-export default function Topbar({ seniorId, onOpenSetup }) {
+export default function Topbar({ seniorId, account, onOpenSetup }) {
   const short = seniorId
     ? (seniorId.length > 22 ? seniorId.slice(0, 22) + '…' : seniorId)
     : 'Not configured'
+  const roleLabel = account?.role === 'senior' ? 'Senior Portal' : 'Caretaker Portal'
 
   return (
     <>
@@ -10,9 +11,15 @@ export default function Topbar({ seniorId, onOpenSetup }) {
           <span className="tb-paw">🐾</span>
           <span className="tb-name">PawBot</span>
           <span className="tb-divider" />
-          <span className="tb-subtitle">Caretaker Portal</span>
+          <span className="tb-subtitle">{roleLabel}</span>
         </div>
         <div className="topbar-right">
+          {account && (
+            <div className="senior-chip">
+              <span className="chip-label">{account.role}</span>
+              <span className="chip-id" title={account.email}>{account.name}</span>
+            </div>
+          )}
           {seniorId && (
             <div className="senior-chip">
               <span className="chip-pulse" />
@@ -20,9 +27,11 @@ export default function Topbar({ seniorId, onOpenSetup }) {
               <span className="chip-id" title={seniorId}>{short}</span>
             </div>
           )}
-          <button className="tb-gear" onClick={onOpenSetup} title="Settings">
-            ⚙
-          </button>
+          {onOpenSetup && (
+            <button className="tb-gear" onClick={onOpenSetup} title="Settings">
+              ⚙
+            </button>
+          )}
         </div>
       </header>
       <style>{`

@@ -32,6 +32,8 @@ export default function Integrations() {
   const [connections, setConnections]   = useState([])
   const [loading, setLoading]           = useState(true)
   const [syncing, setSyncing]           = useState(false)
+  const [summarizing, setSummarizing]   = useState(false)
+  const [emailSummary, setEmailSummary] = useState(null)
   const [connecting, setConnecting]     = useState({})
   const refreshTimer = useRef(null)
 
@@ -111,8 +113,25 @@ export default function Integrations() {
     }
   }
 
+  const handleEmailSummary = async () => {
+    setSummarizing(true)
+    try {
+      const res = await api(`/api/seniors/${seniorId}/hyperspell/email-summary`, {
+        method: 'POST',
+        body: { days: 2 },
+      })
+      setEmailSummary(res)
+      toast(`Email summary found ${res.importantCount ?? 0} important item${res.importantCount === 1 ? '' : 's'} and marked ${res.scamCount ?? 0} scam${res.scamCount === 1 ? '' : 's'}.`)
+    } catch (e) {
+      toast(e.message, 'error')
+    } finally {
+      setSummarizing(false)
+    }
+  }
+
   const getConn = (id) => connections.find(c => normalizeProvider(c.provider ?? c.source) === id)
   const anyConnected = connections.length > 0
+  const gmailConnected = !!getConn('google_mail')
 
   if (!seniorId) return (
     <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
@@ -176,6 +195,38 @@ export default function Integrations() {
           </div>
         )}
 
+        {gmailConnected && (
+          <div className="email-agent-panel glass-card">
+            <div>
+              <h2>Email summary agent</h2>
+              <p>Review recent Gmail, summarize important messages, and mark scam-like emails as PawBot scam alerts.</p>
+            </div>
+            <button className="glass-btn primary" onClick={handleEmailSummary} disabled={summarizing}>
+              {summarizing ? '⟳ Reviewing…' : 'Run Email Summary'}
+            </button>
+          </div>
+        )}
+
+        {emailSummary && (
+          <div className="email-summary glass-card">
+            <div className="es-head">
+              <h2>Recent email summary</h2>
+              <span>{emailSummary.importantCount} important · {emailSummary.scamCount} scam</span>
+            </div>
+            <p className="es-summary">{emailSummary.summary}</p>
+            {!!emailSummary.scamAlerts?.length && (
+              <div className="es-scams">
+                {emailSummary.scamAlerts.map(alert => (
+                  <div key={alert.id} className="es-scam">
+                    <span>{alert.riskLevel}</span>
+                    <p>{alert.summary}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="info-panel glass-card">
           <span className="info-glyph">ℹ</span>
           <div>
@@ -197,6 +248,20 @@ export default function Integrations() {
         .page-header h1 { font-size: 24px; margin-bottom: 5px; }
         .page-sub { font-size: 13.5px; color: var(--text-secondary); line-height: 1.5; }
         .provider-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 20px; }
+        .email-agent-panel {
+          display: flex; justify-content: space-between; align-items: center; gap: 16px;
+          padding: 18px 20px; margin-bottom: 14px;
+        }
+        .email-agent-panel h2, .email-summary h2 { font-size: 14px; margin-bottom: 5px; }
+        .email-agent-panel p { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+        .email-summary { padding: 18px 20px; margin-bottom: 14px; }
+        .es-head { display: flex; justify-content: space-between; gap: 14px; align-items: baseline; margin-bottom: 10px; }
+        .es-head span { font-size: 12px; color: var(--text-tertiary); white-space: nowrap; }
+        .es-summary { white-space: pre-wrap; font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
+        .es-scams { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+        .es-scam { padding: 10px 12px; border: 1px solid rgba(255,71,87,0.25); border-radius: 8px; background: var(--danger-dim); }
+        .es-scam span { display: block; color: var(--danger); font-size: 11px; font-weight: 700; text-transform: uppercase; margin-bottom: 4px; }
+        .es-scam p { font-size: 12.5px; line-height: 1.45; color: var(--text-primary); }
         .provider-card {
           padding: 24px;
           display: flex; flex-direction: column; gap: 14px;
@@ -225,7 +290,10 @@ export default function Integrations() {
         .info-glyph { color: var(--info); font-size: 17px; flex-shrink: 0; margin-top: 2px; }
         .info-title { font-size: 13.5px; font-weight: 500; margin-bottom: 5px; }
         .info-body { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
-        @media (max-width: 560px) { .provider-grid { grid-template-columns: 1fr; } }
+        @media (max-width: 560px) {
+          .provider-grid { grid-template-columns: 1fr; }
+          .email-agent-panel { align-items: stretch; flex-direction: column; }
+        }
       `}</style>
     </>
   )

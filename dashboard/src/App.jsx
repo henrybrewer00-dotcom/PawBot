@@ -3,11 +3,13 @@ import Sidebar from './components/Sidebar.jsx'
 import Topbar from './components/Topbar.jsx'
 import Toast from './components/Toast.jsx'
 import SetupModal from './components/SetupModal.jsx'
+import AccountSetup from './components/AccountSetup.jsx'
 import Login from './pages/Login.jsx'
 import Overview from './pages/Overview.jsx'
 import Medications from './pages/Medications.jsx'
 import Integrations from './pages/Integrations.jsx'
 import AlertsMemory from './pages/AlertsMemory.jsx'
+import { api } from './api.js'
 import { insforge } from './insforge.js'
 
 export const AppContext = createContext(null)
@@ -27,6 +29,8 @@ export default function App() {
   const [toasts, setToasts] = useState([])
   const [user, setUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [profile, setProfile] = useState(null)
+  const [profileLoading, setProfileLoading] = useState(false)
 
   useEffect(() => {
     insforge.auth.getCurrentUser().then(({ data }) => {
@@ -38,21 +42,68 @@ export default function App() {
     })
   }, [])
 
+  const applyProfile = useCallback((nextProfile) => {
+    setProfile(nextProfile)
+    if (nextProfile?.seniorId) {
+      localStorage.setItem('pawbot_senior_id', nextProfile.seniorId)
+      setSeniorId(nextProfile.seniorId)
+      setShowSetup(false)
+    } else if (nextProfile?.account?.role === 'senior') {
+      localStorage.setItem('pawbot_senior_id', nextProfile.account.id)
+      setSeniorId(nextProfile.account.id)
+      setShowSetup(false)
+    } else if (nextProfile?.account?.role === 'caretaker') {
+      const stored = localStorage.getItem('pawbot_senior_id')
+      if (!stored) setShowSetup(true)
+    }
+  }, [])
+
+  const loadProfile = useCallback(async () => {
+    setProfileLoading(true)
+    try {
+      const res = await api('/api/me/profile')
+      applyProfile(res.profile)
+    } catch {
+      setProfile(null)
+    } finally {
+      setProfileLoading(false)
+    }
+  }, [applyProfile])
+
+  useEffect(() => {
+    if (!user) {
+      queueMicrotask(() => setProfile(null))
+      return
+    }
+    queueMicrotask(() => loadProfile())
+  }, [user, loadProfile])
+
   const toast = useCallback((message, type = 'success') => {
     const id = Date.now() + Math.random()
     setToasts(prev => [...prev, { id, message, type }])
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3200)
   }, [])
 
-  const saveSeniorId = (id) => {
-    localStorage.setItem('pawbot_senior_id', id)
-    setSeniorId(id)
+  const saveSeniorId = (id, nextProfile) => {
+    if (id) {
+      localStorage.setItem('pawbot_senior_id', id)
+      setSeniorId(id)
+    }
+    if (nextProfile) setProfile(nextProfile)
     setShowSetup(false)
   }
 
   async function handleLogout() {
     await insforge.auth.signOut()
     setUser(null)
+    setProfile(null)
+    setSeniorId('')
+    localStorage.removeItem('pawbot_senior_id')
+  }
+
+  function handleLogin(nextUser, nextProfile) {
+    setUser(nextUser)
+    if (nextProfile) applyProfile(nextProfile)
   }
 
   if (authLoading) {
@@ -64,13 +115,25 @@ export default function App() {
   }
 
   if (!user) {
-    return <Login onLogin={setUser} />
+    return <Login onLogin={handleLogin} />
+  }
+
+  if (profileLoading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: 'var(--text-secondary)', fontSize: 15 }}>
+        Loading account…
+      </div>
+    )
+  }
+
+  if (!profile?.account) {
+    return <AccountSetup user={user} onComplete={applyProfile} />
   }
 
   const PageComponent = PAGES[page]
 
   return (
-    <AppContext.Provider value={{ seniorId, toast, setPage, user }}>
+    <AppContext.Provider value={{ seniorId, toast, setPage, user, profile, account: profile.account }}>
       <div style={{
         display: 'flex',
         height: '100vh',
@@ -79,7 +142,11 @@ export default function App() {
       }}>
         <Sidebar currentPage={page} onNavigate={setPage} onLogout={handleLogout} />
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <Topbar seniorId={seniorId} onOpenSetup={() => setShowSetup(true)} />
+          <Topbar
+            seniorId={seniorId}
+            account={profile.account}
+            onOpenSetup={() => setShowSetup(true)}
+          />
           <main style={{
             flex: 1,
             overflowY: 'auto',
@@ -93,6 +160,7 @@ export default function App() {
       {showSetup && (
         <SetupModal
           initialId={seniorId}
+          accountRole={profile.account.role}
           onSave={saveSeniorId}
           onClose={seniorId ? () => setShowSetup(false) : null}
         />

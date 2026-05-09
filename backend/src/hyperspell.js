@@ -67,8 +67,14 @@ export async function getUserAuthProfile(seniorId) {
   }
 }
 
+// Integration IDs from GET /integrations/list — used for direct link URLs
+// which force a fresh OAuth flow with correct scopes.
+const INTEGRATION_IDS = {
+  google_mail: "019e0e15-f7ca-74bd-9a44-6087600ea2d1",
+  google_drive: "019e0e15-f89d-7259-9ed6-549145a6d5a6"
+};
+
 export async function getConnectUrl(seniorId, provider, redirectUrl, userToken) {
-  validateProvider(provider);
   if (!config.hyperspell.apiKey) return null;
 
   try {
@@ -76,12 +82,16 @@ export async function getConnectUrl(seniorId, provider, redirectUrl, userToken) 
     const token = tokenData?.token ?? tokenData?.user_token;
     if (!token) return null;
 
-    const url = new URL("https://connect.hyperspell.com");
+    const integrationId = INTEGRATION_IDS[provider];
+    const base = integrationId
+      ? `https://connect.hyperspell.com/link/${integrationId}`
+      : "https://connect.hyperspell.com";
+
+    const url = new URL(base);
     url.searchParams.set("token", token);
-    url.searchParams.set("providers", provider);
-    url.searchParams.set("syncMemories", "true");
     url.searchParams.set("popup", "false");
     url.searchParams.set("autoclose", "true");
+    if (!integrationId) url.searchParams.set("providers", provider);
     if (redirectUrl) url.searchParams.set("redirect_uri", redirectUrl);
 
     return { url: url.toString(), expires_at: tokenData?.expires_at ?? null };

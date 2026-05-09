@@ -179,7 +179,7 @@ export async function syncCalendarEvents(store, seniorId) {
     seniorId,
     CALENDAR_QUERY,
     ["google_calendar"],
-    { effort: 1, options: { after: now.toISOString(), before: twoWeeksOut.toISOString(), max_results: 20 } }
+    { effort: "high", options: { after: now.toISOString(), before: twoWeeksOut.toISOString(), max_results: 20 } }
   );
   const created = [];
 
@@ -210,10 +210,12 @@ export async function syncCalendarEvents(store, seniorId) {
   return created;
 }
 
+const GMAIL_LIVE_OPTS = { effort: "high", options: { google_mail: { label_ids: ["INBOX"] }, max_results: 20 } };
+
 export async function scanEmailsForScams(store, seniorId) {
   if (!await isConnected(store, seniorId, "google_mail")) return [];
 
-  const documents = await queryMemory(seniorId, SCAM_QUERY, ["gmail"]);
+  const documents = await queryMemory(seniorId, SCAM_QUERY, ["google_mail"], GMAIL_LIVE_OPTS);
   const created = [];
 
   for (const document of documents) {
@@ -248,8 +250,12 @@ export async function runEmailSummaryAgent(store, seniorId, { days = 2 } = {}) {
     };
   }
 
+  const after = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const query = `${IMPORTANT_EMAIL_QUERY} last ${days} days`;
-  const documents = await queryMemory(seniorId, query, ["gmail"]);
+  const documents = await queryMemory(seniorId, query, ["google_mail"], {
+    effort: "high",
+    options: { after, google_mail: { label_ids: ["INBOX"] }, max_results: 20 }
+  });
   const importantEmails = [];
   const scamAlerts = [];
 
@@ -411,14 +417,25 @@ function collectProviderCandidates(value, candidates = []) {
 
 export async function refreshHyperspellConnections(store, seniorId) {
   const profile = await getUserAuthProfile(seniorId);
-  const providers = new Set(
-    collectProviderCandidates(profile)
-      .map(normalizeHyperspellProvider)
-      .filter(Boolean)
+
+  // Use installed_integrations as the authoritative list
+  const installedRaw = profile?.installed_integrations ?? collectProviderCandidates(profile);
+  const liveProviders = new Set(
+    installedRaw.map(normalizeHyperspellProvider).filter(Boolean)
   );
 
+  // Remove any local connections that Hyperspell no longer reports
+  const existing = (await store.all("hyperspellConnections"))
+    .filter((c) => c.seniorId === seniorId);
+  for (const conn of existing) {
+    if (!liveProviders.has(normalizeHyperspellProvider(conn.provider))) {
+      await store.delete("hyperspellConnections", conn.id);
+    }
+  }
+
+  // Add any newly connected providers
   const recorded = [];
-  for (const provider of providers) {
+  for (const provider of liveProviders) {
     recorded.push(await recordHyperspellConnection(store, { seniorId, provider }));
   }
 

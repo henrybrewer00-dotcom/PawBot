@@ -50,6 +50,14 @@ export class InsForgeStore {
     if (error) throw new Error(`store.update(${collection}): ${error.message}`);
     return data[0] ? rowToCamel(data[0]) : null;
   }
+
+  async delete(collection, id) {
+    const { error } = await insforge.database
+      .from(TABLES[collection])
+      .delete()
+      .eq("id", id);
+    if (error) throw new Error(`store.delete(${collection}): ${error.message}`);
+  }
 }
 
 export const store = new InsForgeStore();

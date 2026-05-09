@@ -21,7 +21,7 @@ export default function SetupModal({ initialId, onSave, onClose }) {
           <div className="modal-header">
             <span className="modal-icon">🐾</span>
             <h2>Configure PawBot</h2>
-            <p>Enter the Senior ID to connect this dashboard to a care profile.</p>
+            <p>Enter the Senior ID for the profile you want to monitor.</p>
           </div>
           <form onSubmit={handleSubmit} className="modal-form">
             <label>
@@ -36,12 +36,13 @@ export default function SetupModal({ initialId, onSave, onClose }) {
                 spellCheck={false}
                 autoComplete="off"
               />
-              <span className="field-hint">
-                Find this in the backend data store at <code>backend/data/pawbot.json</code> under <code>users</code> where role is "senior".
-              </span>
             </label>
-            <button type="submit" className="glass-btn primary submit-btn" disabled={!value.trim()}>
-              Save &amp; Connect
+            <button
+              type="submit"
+              className="glass-btn primary submit-btn"
+              disabled={!value.trim()}
+            >
+              Save & Connect
             </button>
           </form>
         </div>

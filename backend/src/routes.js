@@ -1,4 +1,5 @@
 import express from "express";
+import { requireInsForgeUser } from "./auth.js";
 import { asyncHandler, HttpError, requireFields } from "./http.js";
 import { config } from "./config.js";
 import { runCalendarReminderAgent } from "./calendarReminder.js";
@@ -10,6 +11,7 @@ import {
   createScamAlert,
   createUser,
   escalateMissedMedication,
+  getAccountProfile,
   getMedicationsForSenior,
   getScamAlertsForSenior,
   getTodayMedicationStatus,
@@ -19,6 +21,7 @@ import {
   markMedicationTaken,
   runMedicationAgentTick,
   sendMedicationReminder,
+  upsertAccountProfile,
   updateMedication
 } from "./domain.js";
 import { searchSeniorMemory } from "./nia.js";
@@ -27,6 +30,7 @@ import {
   normalizeHyperspellProvider,
   refreshHyperspellConnections,
   recordHyperspellConnection,
+  runEmailSummaryAgent,
   runHyperspellSyncTick,
   scanEmailsForScams,
   syncCalendarEvents,
@@ -53,6 +57,42 @@ export function createRouter(store) {
   router.get("/health", (req, res) => {
     res.json({ ok: true, service: "pawbot-backend" });
   });
+
+  router.get("/api/me/profile", asyncHandler(async (req, res) => {
+    const authUser = await requireInsForgeUser(req);
+    res.json({ profile: await getAccountProfile(store, authUser) });
+  }));
+
+  router.post("/api/me/profile", asyncHandler(async (req, res) => {
+    const authUser = await requireInsForgeUser(req);
+    requireFields(req.body, ["role", "name", "phone"]);
+    res.status(201).json({ profile: await upsertAccountProfile(store, authUser, req.body) });
+  }));
+
+  router.post("/api/me/seniors", asyncHandler(async (req, res) => {
+    const authUser = await requireInsForgeUser(req);
+    const profile = await getAccountProfile(store, authUser);
+    if (!profile?.account) throw new HttpError(404, "Account profile not found");
+    if (profile.account.role !== "caretaker") {
+      throw new HttpError(403, "Only caretaker accounts can create senior profiles");
+    }
+
+    requireFields(req.body, ["name", "phone", "email"]);
+    const senior = await createUser(store, {
+      ...req.body,
+      role: "senior",
+      timezone: req.body.timezone ?? profile.account.timezone
+    });
+    await linkCaretakerToSenior(store, {
+      caretakerId: profile.account.id,
+      seniorId: senior.id
+    });
+
+    res.status(201).json({
+      senior,
+      profile: await getAccountProfile(store, authUser)
+    });
+  }));
 
   router.post("/api/seniors", asyncHandler(async (req, res) => {
     requireFields(req.body, ["name", "phone", "email"]);
@@ -139,16 +179,13 @@ export function createRouter(store) {
   }));
 
   router.post("/api/seniors/:seniorId/hyperspell/connect", asyncHandler(async (req, res) => {
-    requireFields(req.body, ["provider"]);
-    requireHyperspellProvider(req.body.provider);
-
+    const provider = normalizeHyperspellProvider(req.body?.provider) ?? "google_mail";
     const fallbackRedirectUrl = new URL("/webhooks/hyperspell/connected", config.hyperspell.publicBaseUrl);
     fallbackRedirectUrl.searchParams.set("seniorId", req.params.seniorId);
-    fallbackRedirectUrl.searchParams.set("provider", req.body.provider);
 
-    const redirectUrl = req.body.redirectUrl ?? fallbackRedirectUrl.toString();
+    const redirectUrl = req.body?.redirectUrl ?? fallbackRedirectUrl.toString();
     const userToken = await createUserToken(req.params.seniorId);
-    const connect = await getConnectUrl(req.params.seniorId, req.body.provider, redirectUrl, userToken);
+    const connect = await getConnectUrl(req.params.seniorId, provider, redirectUrl, userToken);
     res.json(connect ?? { url: null, expires_at: null });
   }));
 
@@ -163,6 +200,21 @@ export function createRouter(store) {
     const calendarEvents = await syncCalendarEvents(store, req.params.seniorId);
     const scamAlerts = await scanEmailsForScams(store, req.params.seniorId);
     res.json({ calendarEvents: calendarEvents.length, scamAlerts: scamAlerts.length });
+  }));
+
+  router.post("/api/seniors/:seniorId/hyperspell/email-summary", asyncHandler(async (req, res) => {
+    const days = Number(req.body?.days ?? 2);
+    const result = await runEmailSummaryAgent(store, req.params.seniorId, {
+      days: Number.isFinite(days) ? days : 2
+    });
+    res.json({
+      importantEmails: result.importantEmails,
+      importantCount: result.importantEmails.length,
+      scamAlerts: result.scamAlerts,
+      scamCount: result.scamAlerts.length,
+      summary: result.summary,
+      connected: result.connected
+    });
   }));
 
   router.post("/api/agent/tick", asyncHandler(async (req, res) => {
@@ -207,10 +259,8 @@ export function createRouter(store) {
 
   router.get("/webhooks/hyperspell/connected", asyncHandler(async (req, res) => {
     const seniorId = String(req.query.seniorId ?? "");
-    const provider = normalizeHyperspellProvider(req.query.provider);
-    if (seniorId && provider) {
-      await recordHyperspellConnection(store, { seniorId, provider });
-      await syncProvider(store, seniorId, provider);
+    if (seniorId) {
+      await refreshHyperspellConnections(store, seniorId);
     }
 
     res

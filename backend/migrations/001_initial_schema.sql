@@ -3,6 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS users (
   id text PRIMARY KEY,
+  auth_user_id text UNIQUE,
   name text NOT NULL,
   phone text NOT NULL,
   email text NOT NULL,
