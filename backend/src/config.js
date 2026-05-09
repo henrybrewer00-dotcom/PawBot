@@ -26,6 +26,7 @@ const hyperspellApiKey = () => {
 export const config = {
   port: numberFromEnv("PORT", 4000),
   publicBaseUrl: process.env.PUBLIC_BASE_URL ?? "http://localhost:4000",
+  agentAuthToken: process.env.AGENT_AUTH_TOKEN ?? "",
   sendblue: {
     apiKey: process.env.SENDBLUE_API_KEY ?? "",
     apiSecret: process.env.SENDBLUE_API_SECRET ?? "",
@@ -38,6 +39,9 @@ export const config = {
     apiKey: hyperspellApiKey(),
     syncHours: numberFromEnv("HYPERSPELL_SYNC_HOURS", 6),
     publicBaseUrl: process.env.PUBLIC_BASE_URL ?? "http://localhost:4000"
+  },
+  tensorlake: {
+    apiKey: process.env.TENSORLAKE_API_KEY ?? ""
   },
   agent: {
     pollSeconds: numberFromEnv("AGENT_POLL_SECONDS", 30),

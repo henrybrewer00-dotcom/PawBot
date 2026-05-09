@@ -5,6 +5,7 @@ import { store } from "./store.js";
 import { createRouter } from "./routes.js";
 import { runMedicationAgentTick } from "./domain.js";
 import { runHyperspellSyncTick } from "./hyperspellSync.js";
+import { startTensorlakeAgents } from "./tensorlakeRunner.js";
 
 const app = express();
 
@@ -25,15 +26,25 @@ app.use((error, req, res, next) => {
 
 app.listen(config.port, () => {
   console.log(`PawBot backend listening on http://localhost:${config.port}`);
-  console.log(`Medication agent polling every ${config.agent.pollSeconds}s`);
+  if (config.tensorlake.apiKey) {
+    console.log("Medication agent running in Tensorlake");
+  } else {
+    console.log(`Medication agent polling every ${config.agent.pollSeconds}s`);
+  }
   console.log(`Hyperspell sync polling every ${config.hyperspell.syncHours}h`);
 });
 
-setInterval(() => {
-  runMedicationAgentTick(store).catch((error) => {
-    console.error("Medication agent tick failed", error);
+if (config.tensorlake.apiKey) {
+  startTensorlakeAgents().catch((error) => {
+    console.error("Tensorlake agent launch failed", error);
   });
-}, config.agent.pollSeconds * 1000);
+} else {
+  setInterval(() => {
+    runMedicationAgentTick(store).catch((error) => {
+      console.error("Medication agent tick failed", error);
+    });
+  }, config.agent.pollSeconds * 1000);
+}
 
 setInterval(() => {
   runHyperspellSyncTick(store).catch((error) => {

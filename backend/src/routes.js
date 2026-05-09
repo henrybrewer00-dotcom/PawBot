@@ -1,6 +1,8 @@
 import express from "express";
 import { asyncHandler, HttpError, requireFields } from "./http.js";
 import { config } from "./config.js";
+import { runCalendarReminderAgent } from "./calendarReminder.js";
+import { runDailySummaryAgent } from "./dailySummary.js";
 import {
   createCalendarEvent,
   createMedication,
@@ -22,6 +24,7 @@ import { searchSeniorMemory } from "./nia.js";
 import { createUserToken, getConnectUrl, HYPERSPELL_PROVIDERS } from "./hyperspell.js";
 import {
   recordHyperspellConnection,
+  runHyperspellSyncTick,
   scanEmailsForScams,
   syncCalendarEvents,
   syncProvider
@@ -30,6 +33,14 @@ import {
 function requireHyperspellProvider(provider) {
   if (!HYPERSPELL_PROVIDERS.has(provider)) {
     throw new HttpError(400, "provider must be google_calendar or google_mail");
+  }
+}
+
+function requireAgentAuth(req) {
+  const expected = config.agentAuthToken;
+  const actual = req.get("authorization") ?? "";
+  if (!expected || actual !== `Bearer ${expected}`) {
+    throw new HttpError(401, "Unauthorized agent request");
   }
 }
 
@@ -147,6 +158,33 @@ export function createRouter(store) {
   router.post("/api/agent/tick", asyncHandler(async (req, res) => {
     const results = await runMedicationAgentTick(store);
     res.json({ ran: true, actions: results.length, results });
+  }));
+
+  router.post("/api/agents/medication-tick", asyncHandler(async (req, res) => {
+    requireAgentAuth(req);
+    const results = await runMedicationAgentTick(store);
+    res.json({ ran: true, actions: results.length, results });
+  }));
+
+  router.post("/api/agents/hyperspell-sync", asyncHandler(async (req, res) => {
+    requireAgentAuth(req);
+    const results = await runHyperspellSyncTick(store);
+    res.json({ ran: true, results });
+  }));
+
+  router.post("/api/agents/calendar-reminders", asyncHandler(async (req, res) => {
+    requireAgentAuth(req);
+    const reminders = await runCalendarReminderAgent(store);
+    res.json({ reminded: reminders.length, reminders });
+  }));
+
+  router.post("/api/agents/daily-summary", asyncHandler(async (req, res) => {
+    requireAgentAuth(req);
+    const summaries = await runDailySummaryAgent(store);
+    res.json({
+      summariesSent: summaries.reduce((total, summary) => total + summary.summariesSent, 0),
+      summaries
+    });
   }));
 
   router.post("/webhooks/sendblue/inbound", asyncHandler(async (req, res) => {
