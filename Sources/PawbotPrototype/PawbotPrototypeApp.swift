@@ -459,26 +459,68 @@ final class PawbotModel: ObservableObject {
         }
         isPawbotThinking = true
         Task { @MainActor in
-            do {
-                let brief = try await PawbotBackend.shared.morningBrief(force: force)
+            if let brief = try? await PawbotBackend.shared.morningBrief(force: force),
+               let text = brief.brief, !text.isEmpty {
                 isPawbotThinking = false
-                guard let text = brief.brief, !text.isEmpty else {
-                    appendBot("I couldn't put together a brief just yet. Try again in a moment.")
-                    return
-                }
                 appendBot("☀️ Good morning — here's your brief:\n\n\(text)")
                 lastShownBriefDate = brief.date
                 Task { await PawbotAI.shared.recordExchange(
                     user: "[Pawbot delivered the morning brief]",
                     assistant: text
                 ) }
-            } catch let error as PawbotBackendError {
-                isPawbotThinking = false
-                appendBot(error.errorDescription ?? "Couldn't reach the morning brief.")
-            } catch {
-                isPawbotThinking = false
-                appendBot("Couldn't load the morning brief: \(error.localizedDescription)")
+                return
             }
+            await generateLocalMorningBrief()
+        }
+    }
+
+    private func generateLocalMorningBrief() async {
+        let now = Date()
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .full
+        let dateStr = dateFormatter.string(from: now)
+        let hour = Calendar.current.component(.hour, from: now)
+        let timeOfDay = hour < 12 ? "morning" : (hour < 17 ? "afternoon" : "evening")
+
+        var contextParts: [String] = []
+
+        if let texts = try? await PawbotMessagesAPI.shared.recentMessages(limit: 5), !texts.isEmpty {
+            let lines = texts.map { "- \($0.prettySender) (\($0.relativeTime)): \($0.text)" }.joined(separator: "\n")
+            contextParts.append("Recent texts (last 5 from chat.db):\n\(lines)")
+        }
+        if let events = try? await PawbotBackend.shared.upcomingEvents(limit: 5), !events.isEmpty {
+            let lines = events.map { e -> String in
+                let when = e.start ?? "Time unknown"
+                let where_ = (e.location?.isEmpty == false) ? " at \(e.location!)" : ""
+                return "- \(e.title) (\(when))\(where_)"
+            }.joined(separator: "\n")
+            contextParts.append("Upcoming calendar events:\n\(lines)")
+        }
+        if let emails = try? await PawbotBackend.shared.recentGmail(limit: 4), !emails.isEmpty {
+            let lines = emails.map { "- From \($0.from): \($0.subject) — \($0.snippet.prefix(140))" }.joined(separator: "\n")
+            contextParts.append("Recent emails:\n\(lines)")
+        }
+
+        let request = """
+        Generate a warm \(timeOfDay) brief for the user. Today is \(dateStr). \
+        Write 4-5 short, friendly sentences in plain language for an older adult. \
+        Mention what stands out from any context provided (texts, calendar, emails). \
+        End with one kind question or suggestion. If there's no context at all, \
+        give a brief friendly greeting and ask how you can help today.
+        """
+        let context = contextParts.joined(separator: "\n\n")
+
+        do {
+            let brief = try await PawbotAI.shared.reply(
+                to: request,
+                ephemeralContext: context.isEmpty ? nil : context
+            )
+            isPawbotThinking = false
+            appendBot("☀️ \(brief)")
+            lastShownBriefDate = todayDateString()
+        } catch {
+            isPawbotThinking = false
+            appendBot("Couldn't put together a brief just now: \(error.localizedDescription)")
         }
     }
 
@@ -491,9 +533,15 @@ final class PawbotModel: ObservableObject {
                 isMorningBriefLoading = false
             } catch let error as PawbotBackendError {
                 isMorningBriefLoading = false
-                morningBriefLoadingError = error.errorDescription
+                morningBriefHistory = []
+                if case .badResponse(let code, _) = error, code == 404 {
+                    morningBriefLoadingError = "Past briefs aren't stored on this backend yet — tap \"Show today's brief\" and Pawbot will put one together for you live."
+                } else {
+                    morningBriefLoadingError = error.errorDescription
+                }
             } catch {
                 isMorningBriefLoading = false
+                morningBriefHistory = []
                 morningBriefLoadingError = error.localizedDescription
             }
         }
@@ -1292,22 +1340,45 @@ actor PawbotAI {
     private var cachedVisionModel: String?
     private var discoveredModels: [String]?
     private let systemPrompt = """
-    You are Pawbot, a calm and patient assistant designed to help older adults \
-    with what's on their computer screen. Speak gently. Use short sentences and \
-    plain words. Offer one step at a time. Never use jargon. Keep responses under \
-    3 sentences unless they ask for more.
+    You are Pawbot. Your one and only user is an OLDER ADULT — typically 65–90 years old. \
+    Many of them have weaker eyesight, slower typing, arthritis, hearing loss, low \
+    tech-literacy, and often feel anxious or embarrassed about using their computer. \
+    Treat every reply as if you were talking to your own grandparent.
 
-    You have tools. Use them whenever the user is asking about something only \
-    the tools can answer. Don't apologize that you can't see something — call \
-    the relevant tool first, then answer with the result. Examples:
-    - "what's on my calendar / events / appointments / next meeting" → get_upcoming_calendar_events
-    - "any new emails / inbox / something from X" → get_recent_emails
-    - "any new texts / what did Sarah text / iMessage from mom" → get_recent_imessages
-    - "what's on my screen / what app is this / explain this page / read this" → look_at_screen
-    - "what's my morning brief / give me a recap" → get_morning_brief
+    HARD RULES:
+    1. Plain words only. NO jargon, no acronyms, no tech-speak. Don't say "URL", \
+       "browser tab", "click the dropdown" — say "the web address", "the page at \
+       the top of your screen", "click the small arrow". Spell things out.
+    2. Short sentences. Aim for 2–3 sentences total. Never write a wall of text. \
+       If a task has multiple steps, only give the FIRST step and ask if they're \
+       ready for the next one.
+    3. Warm and patient. Never sarcastic, ironic, or condescending. Never make \
+       them feel slow or dumb. Reassure them that it's okay to take time.
+    4. Big-picture first. Tell them what's happening before how to do anything: \
+       "It looks like you're on the Netflix sign-in page" before "click the email \
+       box."
+    5. Concrete pointers. Use words like "the blue button at the bottom" or "the \
+       small X in the top-right corner" — never "the primary CTA" or "the close \
+       affordance."
+    6. Be cautious. If you suspect a scam, phishing, or anything fishy, gently \
+       warn them: don't click links, don't share their password, don't send money. \
+       Recommend they ask a family member if unsure.
+    7. Voice their feelings. Things like "no rush", "you're doing great", "I'm \
+       right here" go a long way. Don't overdo it — once per reply max.
+    8. Never assume they remember earlier steps. They might come back to the \
+       conversation an hour later.
+
+    TOOLS — use them whenever they're relevant. Don't apologize for not being \
+    able to see something — call the right tool first, THEN answer.
+    - calendar / events / appointments / meetings / what's coming up → get_upcoming_calendar_events
+    - email / inbox / mail / something from someone → get_recent_emails
+    - text / iMessage / what did mom text / SMS → get_recent_imessages
+    - what's on my screen / explain this page / what app is open / read this → look_at_screen
+    - morning brief / today's recap → get_morning_brief
 
     Call multiple tools in parallel if more than one is relevant. After tool \
-    results come back, answer in plain words.
+    results come back, translate them into plain, warm sentences for the user. \
+    Don't dump raw lists — pick what matters and say it kindly.
     """
 
     private let toolDefinitions: [[String: Any]] = [
@@ -2070,10 +2141,29 @@ enum PawbotBackendError: Error, LocalizedError {
         case .notRunning: return "Backend isn't running. Start it with `cd backend && npm run dev`."
         case .gmailNotConfigured: return "Gmail isn't connected yet. Set COMPOSIO_API_KEY and connect Gmail in Composio."
         case .calendarNotConfigured: return "Calendar isn't connected yet. Set COMPOSIO_API_KEY and connect Google Calendar in Composio."
-        case .badResponse(let code, let body): return "Backend returned HTTP \(code): \(body.prefix(160))"
+        case .badResponse(let code, let body):
+            let cleaned = Self.cleanResponseBody(body)
+            if code == 404 {
+                return "That endpoint isn't on this backend (404). \(cleaned)"
+            }
+            return "Backend returned HTTP \(code): \(cleaned)"
         case .decodeFailed(let path, let detail, let raw):
             return "Couldn't decode response from \(path).\nReason: \(detail)\nGot: \(raw)"
         }
+    }
+
+    private static func cleanResponseBody(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("<") {
+            if let preMatch = trimmed.range(of: "<pre>([^<]+)</pre>", options: .regularExpression) {
+                let pre = String(trimmed[preMatch])
+                    .replacingOccurrences(of: "<pre>", with: "")
+                    .replacingOccurrences(of: "</pre>", with: "")
+                return pre.trimmingCharacters(in: .whitespaces)
+            }
+            return "(server returned HTML error page)"
+        }
+        return String(trimmed.prefix(200))
     }
 }
 
