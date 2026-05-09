@@ -1339,6 +1339,7 @@ actor PawbotAI {
     - email / inbox / mail / something from someone → get_recent_emails
     - what's on my screen / explain this page / what app is open / read this → look_at_screen
     - morning brief / today's recap → get_morning_brief
+    - "open Netflix and sign in" / "search YouTube for X" / "make this website's text bigger" / "fill out this form" / "find the verification code" — anything they want done in their web browser → run_in_browser. The Pawbot Browser extension takes screenshots, clicks, types, and edits CSS for them.
 
     Call multiple tools in parallel if more than one is relevant. After tool \
     results come back, translate them into plain, warm sentences for the user. \
@@ -1400,6 +1401,23 @@ actor PawbotAI {
                 "name": "get_morning_brief",
                 "description": "Get today's pre-generated morning briefing (calendar + emails + warm greeting). Use when the user asks for their morning brief or daily recap.",
                 "parameters": [ "type": "object", "properties": [:] ]
+            ]
+        ],
+        [
+            "type": "function",
+            "function": [
+                "name": "run_in_browser",
+                "description": "Hand a task off to the Pawbot Browser Chrome extension. Use whenever the user asks to do something in their web browser — open a website, sign in, fill out a form, find something, make a website's text bigger, get a verification code from Gmail, etc. The extension takes screenshots, clicks, types, and edits CSS on the senior's behalf using vision. Pass a clear, plain-language description of what you want done.",
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "task": [
+                            "type": "string",
+                            "description": "What to do in the browser, in plain words (e.g., 'open Wikipedia and search for sea otters', 'make the text on this page bigger', 'find the verification code Netflix just emailed me')."
+                        ]
+                    ],
+                    "required": ["task"]
+                ]
             ]
         ]
     ]
@@ -1737,8 +1755,21 @@ actor PawbotToolExecutor {
             return await runScreen(focus: focus)
         case "get_morning_brief":
             return await runMorningBrief()
+        case "run_in_browser":
+            return await runBrowserTask(arguments["task"] as? String ?? "")
         default:
             return "Unknown tool: \(name)"
+        }
+    }
+
+    private func runBrowserTask(_ task: String) async -> String {
+        guard !task.isEmpty else { return "No task provided." }
+        do {
+            return try await PawbotBackend.shared.dispatchBrowserTask(task)
+        } catch let error as PawbotBackendError {
+            return error.errorDescription ?? "Browser task failed."
+        } catch {
+            return "Browser task failed: \(error.localizedDescription)"
         }
     }
 
@@ -2183,6 +2214,41 @@ actor PawbotBackend {
     func morningBriefHistory() async throws -> [PawbotMorningBrief] {
         let resp: PawbotMorningBriefHistory = try await get("/api/morning-brief/history", notConfiguredError: .notRunning)
         return resp.briefs
+    }
+
+    func dispatchBrowserTask(_ task: String) async throws -> String {
+        var enqueueReq = URLRequest(url: baseURL.appendingPathComponent("/api/browser/tasks"))
+        enqueueReq.httpMethod = "POST"
+        enqueueReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        enqueueReq.httpBody = try JSONSerialization.data(withJSONObject: ["task": task])
+        enqueueReq.timeoutInterval = 8
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await URLSession.shared.data(for: enqueueReq)
+        } catch {
+            throw PawbotBackendError.notRunning
+        }
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw PawbotBackendError.badResponse((response as? HTTPURLResponse)?.statusCode ?? -1, String(data: data, encoding: .utf8) ?? "")
+        }
+        struct EnqueueResponse: Decodable { let id: String }
+        let enqueued = try JSONDecoder().decode(EnqueueResponse.self, from: data)
+
+        var waitReq = URLRequest(url: baseURL.appendingPathComponent("/api/browser/tasks/\(enqueued.id)/wait"))
+        waitReq.timeoutInterval = 130
+        let (waitData, waitResponse) = try await URLSession.shared.data(for: waitReq)
+        guard let waitHttp = waitResponse as? HTTPURLResponse, (200..<300).contains(waitHttp.statusCode) else {
+            throw PawbotBackendError.badResponse((waitResponse as? HTTPURLResponse)?.statusCode ?? -1, String(data: waitData, encoding: .utf8) ?? "")
+        }
+        struct WaitResponse: Decodable {
+            let status: String?
+            let result: String?
+        }
+        let resp = try JSONDecoder().decode(WaitResponse.self, from: waitData)
+        if resp.status == "timeout" {
+            return "The browser is still working — give it a moment and ask me to check again."
+        }
+        return resp.result ?? "(Browser finished but didn't say anything.)"
     }
 }
 

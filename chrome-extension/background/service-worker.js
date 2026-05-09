@@ -126,6 +126,29 @@ const TOOLS = [
   {
     type: "function",
     function: {
+      name: "inject_css",
+      description: "Inject CSS into the current page to change how it looks. Great for senior-friendly tweaks like 'make all text bigger', 'darken the background', 'increase line spacing'. The CSS is added to a Pawbot-managed style tag and persists for the tab's lifetime.",
+      parameters: {
+        type: "object",
+        properties: { css: { type: "string", description: "Raw CSS text. Use !important if needed." } },
+        required: ["css"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "make_text_bigger",
+      description: "Quick shortcut: bump the page's text size site-wide. Use when the senior asks to make this site's text bigger.",
+      parameters: {
+        type: "object",
+        properties: { factor: { type: "number", description: "Size multiplier, e.g. 1.5 for 50% bigger. Default 1.4." } }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "done",
       description: "Finish — send a short, plain-language message to the user. Use this whenever the task is done OR you need user input (e.g. password).",
       parameters: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] }
@@ -161,6 +184,16 @@ async function loadXaiKey() {
 }
 
 let activeRun = null;
+// Persist across Go presses so the agent remembers prior tasks in the
+// same browsing session. Reset via popup's "Clear" button or when the
+// service worker is restarted by Chrome.
+let agentMessages = [];
+let bridgeRunning = false;
+
+chrome.runtime.onInstalled.addListener(() => startBridgePoller());
+chrome.runtime.onStartup.addListener(() => startBridgePoller());
+// Best-effort kick on every script load (worker may have just woken up).
+startBridgePoller();
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "agent") return;
@@ -180,6 +213,9 @@ chrome.runtime.onConnect.addListener((port) => {
       }
     } else if (msg.type === "stop") {
       stopped = true;
+    } else if (msg.type === "clear") {
+      agentMessages = [];
+      port.postMessage({ type: "result", text: "Conversation cleared." });
     }
   });
 });
@@ -198,17 +234,19 @@ async function runAgent(task, port, isStopped) {
   await sleep(400);
   const firstSnap = await snapshot();
 
-  const messages = [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: task },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: `Here is the current browser. URL: ${firstSnap.url}\nViewport: ${firstSnap.width}x${firstSnap.height} CSS pixels.` },
-        { type: "image_url", image_url: { url: firstSnap.dataUrl } }
-      ]
-    }
-  ];
+  if (agentMessages.length === 0) {
+    agentMessages.push({ role: "system", content: SYSTEM_PROMPT });
+  }
+  agentMessages.push({ role: "user", content: task });
+  agentMessages.push({
+    role: "user",
+    content: [
+      { type: "text", text: `Here is the current browser. URL: ${firstSnap.url}\nViewport: ${firstSnap.width}x${firstSnap.height} CSS pixels.` },
+      { type: "image_url", image_url: { url: firstSnap.dataUrl } }
+    ]
+  });
+  trimAgentMessages();
+  const messages = agentMessages;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     if (isStopped()) {
@@ -282,6 +320,79 @@ async function runAgent(task, port, isStopped) {
     });
   }
   port.postMessage({ type: "error", text: "Pawbot ran out of steps. Try a smaller request." });
+}
+
+async function startBridgePoller() {
+  if (bridgeRunning) return;
+  bridgeRunning = true;
+  try {
+    while (bridgeRunning) {
+      let task = null;
+      try {
+        const res = await fetch(`${PAWBOT_BACKEND_URL}/api/browser/tasks/next`, { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.id && data?.task) task = data;
+        }
+      } catch {
+        // Backend not running — back off and try again.
+        await sleep(8000);
+        continue;
+      }
+      if (!task) continue;
+      if (activeRun) {
+        // Re-queue is tricky; just report busy.
+        await reportTaskResult(task.id, "Pawbot Browser was busy and couldn't take this task right now.");
+        continue;
+      }
+      const result = await runTaskHeadless(task.task);
+      await reportTaskResult(task.id, result);
+    }
+  } finally {
+    bridgeRunning = false;
+  }
+}
+
+async function reportTaskResult(id, result) {
+  try {
+    await fetch(`${PAWBOT_BACKEND_URL}/api/browser/tasks/${encodeURIComponent(id)}/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ result })
+    });
+  } catch {}
+}
+
+async function runTaskHeadless(task) {
+  const fakePort = {
+    postMessage: () => {},
+    disconnect: () => {}
+  };
+  let finalText = "";
+  fakePort.postMessage = (m) => {
+    if (m?.type === "done") finalText = m.text;
+    if (m?.type === "error" && !finalText) finalText = m.text;
+  };
+  try {
+    activeRun = fakePort;
+    await runAgent(task, fakePort, () => false);
+  } catch (err) {
+    finalText = `Pawbot Browser hit a snag: ${err?.message ?? err}`;
+  } finally {
+    activeRun = null;
+  }
+  return finalText || "Done.";
+}
+
+function trimAgentMessages(maxTurns = 30) {
+  // Always keep the system message; cap the rest.
+  const sys = agentMessages.find((m) => m.role === "system");
+  const rest = agentMessages.filter((m) => m.role !== "system");
+  if (rest.length <= maxTurns) return;
+  const trimmed = rest.slice(rest.length - maxTurns);
+  agentMessages.length = 0;
+  if (sys) agentMessages.push(sys);
+  agentMessages.push(...trimmed);
 }
 
 function pruneOldScreenshots(messages, keep) {
@@ -412,6 +523,8 @@ async function executeTool(name, args, xaiKey) {
     case "wait": await sleep((args.seconds || 1) * 1000); return `Waited ${args.seconds || 1}s.`;
     case "get_latest_email_code": return await toolGetEmailCode(args.from_contains || "");
     case "read_page": return await toolReadPage();
+    case "inject_css": return await toolInjectCSS(args.css || "");
+    case "make_text_bigger": return await toolMakeTextBigger(args.factor ?? 1.4);
     case "done": return args.answer || "Done.";
     default: return `Unknown tool: ${name}`;
   }
@@ -567,6 +680,32 @@ async function toolReadPage() {
   });
   if (!result) return "Could not read the page.";
   return `URL: ${result.url}\nTitle: ${result.title}\n\n${result.text}`;
+}
+
+async function toolInjectCSS(css) {
+  if (!css || typeof css !== "string") return "No CSS provided.";
+  const tab = await getActiveTab();
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (rules) => {
+      const ID = "__pawbot_injected_css";
+      let styleEl = document.getElementById(ID);
+      if (!styleEl) {
+        styleEl = document.createElement("style");
+        styleEl.id = ID;
+        document.documentElement.appendChild(styleEl);
+      }
+      styleEl.textContent += "\n" + rules;
+    },
+    args: [css]
+  });
+  return `Applied CSS (${css.length} chars).`;
+}
+
+async function toolMakeTextBigger(factor) {
+  const f = Math.max(1.0, Math.min(3.0, Number(factor) || 1.4));
+  const css = `html { font-size: ${Math.round(f * 100)}% !important; } body, p, li, a, span, div, h1, h2, h3, h4, h5, h6, button, input, label { line-height: 1.5 !important; }`;
+  return await toolInjectCSS(css);
 }
 
 async function toolGetEmailCode(fromContains) {

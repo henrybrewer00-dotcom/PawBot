@@ -110,6 +110,9 @@ button.secondary {
 
 .hidden { display: none !important; }
 
+.row { display: flex; gap: 8px; margin-top: 8px; }
+.flex { flex: 1; margin-top: 0 !important; }
+
 .status {
   margin-top: 14px;
   display: flex;

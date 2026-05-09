@@ -28,6 +28,7 @@ import { searchSeniorMemory } from "./nia.js";
 import { fetchGmailRecent, fetchCalendarUpcoming, isComposioConfigured, probeRaw } from "./composio.js";
 import { listScamAlerts, dismissScamAlert, scannerStatus } from "./scamScanner.js";
 import { generateMorningBrief, getCachedMorningBrief, listMorningBriefs } from "./morningBrief.js";
+import { enqueueTask as enqueueBrowserTask, claimNextTask as claimNextBrowserTask, recordResult as recordBrowserResult, getResult as getBrowserResult, waitForResult as waitForBrowserResult } from "./browserBridge.js";
 import { createUserToken, getConnectUrl, HYPERSPELL_PROVIDERS } from "./hyperspell.js";
 import {
   normalizeHyperspellProvider,
@@ -380,6 +381,34 @@ export function createRouter(store) {
   router.get("/api/morning-brief/history", (req, res) => {
     res.json({ briefs: listMorningBriefs() });
   });
+
+  router.post("/api/browser/tasks", (req, res) => {
+    const task = (req.body?.task ?? "").toString().trim();
+    if (!task) {
+      res.status(400).json({ error: "task is required" });
+      return;
+    }
+    const id = enqueueBrowserTask(task);
+    res.status(201).json({ id });
+  });
+
+  router.get("/api/browser/tasks/next", (req, res) => {
+    claimNextBrowserTask(res);
+  });
+
+  router.post("/api/browser/tasks/:id/result", (req, res) => {
+    recordBrowserResult(req.params.id, req.body?.result ?? "");
+    res.json({ ok: true });
+  });
+
+  router.get("/api/browser/tasks/:id", (req, res) => {
+    res.json(getBrowserResult(req.params.id));
+  });
+
+  router.get("/api/browser/tasks/:id/wait", asyncHandler(async (req, res) => {
+    const entry = await waitForBrowserResult(req.params.id, 120_000);
+    res.json(entry);
+  }));
 
   router.get("/api/credentials/xai", (req, res) => {
     if (process.env.VERCEL || process.env.NODE_ENV === "production") {

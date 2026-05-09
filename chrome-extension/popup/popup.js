@@ -5,6 +5,15 @@ const statusEl = document.getElementById("status");
 const statusText = document.getElementById("status-text");
 const logEl = document.getElementById("log");
 const settingsBtn = document.getElementById("settings-btn");
+const clearBtn = document.getElementById("clear-btn");
+
+clearBtn.addEventListener("click", async () => {
+  const tempPort = chrome.runtime.connect({ name: "agent" });
+  tempPort.postMessage({ type: "clear" });
+  setTimeout(() => { try { tempPort.disconnect(); } catch {} }, 200);
+  logEl.innerHTML = "";
+  appendLog("Memory cleared. Pawbot starts fresh.", "result");
+});
 
 let port = null;
 
