@@ -122,7 +122,7 @@ final class PawbotWindowController {
     init() {
         let contentView = PawbotRootView(model: model)
         window = NSWindow(
-            contentRect: .init(x: 0, y: 0, width: 560, height: 620),
+            contentRect: .init(x: 0, y: 0, width: 500, height: 520),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -131,6 +131,7 @@ final class PawbotWindowController {
         window.isOpaque = false
         window.hasShadow = false
         window.level = .floating
+        window.isReleasedWhenClosed = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         window.contentView = NSHostingView(rootView: contentView)
     }
@@ -145,7 +146,7 @@ final class PawbotWindowController {
         guard let screen = NSScreen.main else { return }
         let visible = screen.visibleFrame
         let x = visible.maxX - window.frame.width - 16
-        let y = visible.midY - window.frame.height / 2
+        let y = max(visible.minY + 12, visible.midY - window.frame.height / 2)
         window.setFrameOrigin(.init(x: x, y: y))
     }
 }
@@ -164,7 +165,7 @@ struct PawbotRootView: View {
                         insertion: .move(edge: .trailing).combined(with: .opacity).combined(with: .scale(scale: 0.98, anchor: .trailing)),
                         removal: .move(edge: .trailing).combined(with: .opacity)
                     ))
-                    .padding(.trailing, 62)
+                    .padding(.trailing, 56)
             }
 
             VStack(spacing: 12) {
@@ -177,7 +178,7 @@ struct PawbotRootView: View {
             }
             .padding(.trailing, 12)
         }
-        .frame(width: 560, height: 620)
+        .frame(width: 500, height: 520)
         .onAppear {
             withAnimation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true)) {
                 glow = true
@@ -190,7 +191,7 @@ struct PawbotRootView: View {
         Button(action: model.toggleExpanded) {
             VStack(spacing: 9) {
                 AssistantMark(isActive: glow)
-                    .frame(width: 42, height: 42)
+                    .frame(width: 38, height: 38)
 
                 Text("Pawbot")
                     .font(.system(size: 16, weight: .bold, design: .rounded))
@@ -202,7 +203,7 @@ struct PawbotRootView: View {
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.secondary)
             }
-            .frame(width: 58, height: 158)
+            .frame(width: 54, height: 148)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
@@ -218,19 +219,19 @@ struct PawbotRootView: View {
     private var notificationPeek: some View {
         let notice = model.notifications[model.notificationIndex]
 
-        return VStack(alignment: .leading, spacing: 14) {
+        return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 Image(systemName: notice.icon)
-                    .font(.system(size: 20, weight: .bold))
+                    .font(.system(size: 19, weight: .bold))
                     .foregroundStyle(.white)
-                    .frame(width: 44, height: 44)
+                    .frame(width: 40, height: 40)
                     .background(Color.blue.opacity(0.92), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(notice.title)
-                        .font(.system(size: 21, weight: .bold, design: .rounded))
+                        .font(.system(size: 19, weight: .bold, design: .rounded))
                     Text(notice.body)
-                        .font(.system(size: 17, weight: .medium))
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -241,8 +242,8 @@ struct PawbotRootView: View {
                 MockButton(title: notice.secondary, tint: .gray, action: model.dismissPeek)
             }
         }
-        .padding(16)
-        .frame(width: 342)
+        .padding(14)
+        .frame(width: 318)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 26, style: .continuous)
@@ -252,35 +253,35 @@ struct PawbotRootView: View {
     }
 
     private var expandedPanel: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
                 AssistantMark(isActive: true)
-                    .frame(width: 52, height: 52)
+                    .frame(width: 42, height: 42)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Pawbot")
-                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
                     Text("Here when the screen gets tricky")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
 
                 Spacer()
 
                 Button(action: model.cycleNotice) {
                     Image(systemName: "bell.badge.fill")
-                        .font(.system(size: 22, weight: .bold))
-                        .frame(width: 46, height: 46)
+                        .font(.system(size: 20, weight: .bold))
+                        .frame(width: 42, height: 42)
                 }
                 .buttonStyle(IconButtonStyle())
             }
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
                 ChatBubble(text: "Need help with what's on screen?", isUser: false)
-                ChatBubble(text: "Choose one thing to try.", isUser: false)
             }
 
-            LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 12) {
+            LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 10) {
                 ForEach(model.actions) { action in
                     ActionCard(action: action, isSelected: model.selectedAction == action.title) {
                         withAnimation(.easeInOut(duration: 0.55)) {
@@ -293,22 +294,22 @@ struct PawbotRootView: View {
             HStack(spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: "text.cursor")
-                        .font(.system(size: 21, weight: .bold))
+                        .font(.system(size: 19, weight: .bold))
                         .foregroundStyle(.secondary)
                     Text("Ask Pawbot...")
-                        .font(.system(size: 21, weight: .semibold, design: .rounded))
+                        .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
                 .padding(.horizontal, 16)
-                .frame(height: 58)
-                .background(.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 19, style: .continuous))
+                .frame(height: 52)
+                .background(.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                 Button(action: model.pulseVoice) {
                     Image(systemName: model.isListening ? "waveform" : "mic.fill")
-                        .font(.system(size: 25, weight: .bold))
+                        .font(.system(size: 23, weight: .bold))
                         .foregroundStyle(.white)
-                        .frame(width: 60, height: 60)
+                        .frame(width: 54, height: 54)
                         .background(model.isListening ? Color.green.opacity(0.95) : Color.blue.opacity(0.95), in: Circle())
                         .scaleEffect(model.isListening ? 1.05 : 1)
                         .shadow(color: (model.isListening ? Color.green : Color.blue).opacity(0.24), radius: model.isListening ? 18 : 9)
@@ -316,14 +317,14 @@ struct PawbotRootView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(22)
-        .frame(width: 438)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+        .padding(18)
+        .frame(width: 390)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 30, style: .continuous)
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .stroke(.white.opacity(0.6), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.15), radius: 28, x: 0, y: 16)
+        .shadow(color: .black.opacity(0.15), radius: 22, x: 0, y: 12)
     }
 
 }
@@ -333,7 +334,7 @@ struct AssistantMark: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [Color.blue.opacity(0.95), Color.teal.opacity(0.9)],
@@ -341,17 +342,17 @@ struct AssistantMark: View {
                         endPoint: .bottomTrailing
                     )
                 )
-                .shadow(color: .blue.opacity(isActive ? 0.22 : 0.08), radius: isActive ? 13 : 5)
+                .shadow(color: .blue.opacity(isActive ? 0.2 : 0.08), radius: isActive ? 10 : 4)
 
             VStack(spacing: 6) {
                 HStack(spacing: 7) {
-                    Circle().fill(.white).frame(width: 7, height: 7)
-                    Circle().fill(.white).frame(width: 7, height: 7)
+                    Circle().fill(.white).frame(width: 6, height: 6)
+                    Circle().fill(.white).frame(width: 6, height: 6)
                 }
 
                 Capsule()
                     .fill(.white.opacity(0.86))
-                    .frame(width: 19, height: 4)
+                    .frame(width: 17, height: 4)
             }
         }
         .overlay(alignment: .topTrailing) {
@@ -370,10 +371,10 @@ struct ChatBubble: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 22, weight: .semibold, design: .rounded))
+            .font(.system(size: 19, weight: .semibold, design: .rounded))
             .foregroundStyle(isUser ? .white : .primary)
-            .padding(.horizontal, 17)
-            .padding(.vertical, 14)
+            .padding(.horizontal, 15)
+            .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(isUser ? Color.blue : Color.white.opacity(0.56), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
@@ -386,28 +387,28 @@ struct ActionCard: View {
 
     var body: some View {
         Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 9) {
+            VStack(alignment: .leading, spacing: 7) {
                 Image(systemName: action.icon)
-                    .font(.system(size: 23, weight: .bold))
+                    .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(action.color)
-                    .frame(width: 42, height: 42)
-                    .background(action.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .frame(width: 36, height: 36)
+                    .background(action.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                 Text(action.title)
-                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                    .font(.system(size: 17, weight: .bold, design: .rounded))
                     .foregroundStyle(.primary)
                     .minimumScaleFactor(0.8)
 
                 Text(action.subtitle)
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, minHeight: 124, alignment: .leading)
-            .background(.white.opacity(isSelected ? 0.78 : 0.5), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+            .background(.white.opacity(isSelected ? 0.78 : 0.5), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(isSelected ? action.color.opacity(0.75) : .white.opacity(0.5), lineWidth: isSelected ? 2 : 1)
             )
             .scaleEffect(isSelected ? 1.015 : 1)
