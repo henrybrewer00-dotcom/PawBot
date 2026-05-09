@@ -50,6 +50,7 @@ final class PawbotModel: ObservableObject {
     @Published var isSpeaking = false
 
     private let speech = PawbotSpeech()
+    private var screenshotPollingTask: Task<Void, Never>?
 
     let actions = [
         PawbotAction(title: "Read aloud", subtitle: "Speak the current text", icon: "speaker.wave.2.fill", color: .blue),
@@ -93,6 +94,8 @@ final class PawbotModel: ObservableObject {
         messages.removeAll()
         draftText = ""
         fontScale = 1.0
+        screenshotPollingTask?.cancel()
+        screenshotPollingTask = nil
         Task { await PawbotAI.shared.resetHistory() }
     }
 
@@ -130,6 +133,13 @@ final class PawbotModel: ObservableObject {
             messages.append(userMessage)
             draftText = ""
             isPawbotThinking = true
+        }
+
+        if screenshotPollingTask != nil, CGPreflightScreenCaptureAccess() {
+            screenshotPollingTask?.cancel()
+            screenshotPollingTask = nil
+            lookAtScreen(prompt: trimmed)
+            return
         }
 
         if Self.looksLikeScreenshotRequest(trimmed) {
@@ -235,6 +245,22 @@ final class PawbotModel: ObservableObject {
         Task { await PawbotAI.shared.recordExchange(user: user, assistant: assistant) }
     }
 
+    private func startScreenshotPolling(retryPrompt: String?) {
+        screenshotPollingTask?.cancel()
+        screenshotPollingTask = Task { @MainActor [weak self] in
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .seconds(1))
+                if Task.isCancelled { return }
+                if CGPreflightScreenCaptureAccess() {
+                    guard let self else { return }
+                    self.appendBot("Got it — permission granted. Taking a look now.")
+                    self.lookAtScreen(prompt: retryPrompt)
+                    return
+                }
+            }
+        }
+    }
+
     func lookAtScreen(prompt customPrompt: String? = nil) {
         if !hasStartedConversation {
             withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
@@ -253,7 +279,8 @@ final class PawbotModel: ObservableObject {
             let result: String
             switch await PawbotScreenCapture.captureWithPermission() {
             case .denied:
-                result = "I need your permission to see the screen. macOS just opened (or will open) the Privacy & Security panel — turn on Pawbot under Screen Recording, then ask me again."
+                result = "I need your permission to see the screen. macOS just opened (or will open) the Privacy & Security panel — flip on Pawbot under Screen Recording, and I'll try again on my own as soon as you do."
+                startScreenshotPolling(retryPrompt: customPrompt)
             case .failed(let reason):
                 result = "I couldn't grab the screen — \(reason)"
             case .image(let image):
