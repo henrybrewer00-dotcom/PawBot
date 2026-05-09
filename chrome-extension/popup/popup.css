@@ -1,0 +1,154 @@
+* { box-sizing: border-box; }
+
+body {
+  width: 380px;
+  min-height: 320px;
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, "SF Pro Rounded", "Segoe UI", system-ui, sans-serif;
+  background: linear-gradient(180deg, #f6f9ff 0%, #ffffff 70%);
+  color: #1f2937;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px 6px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand h1 {
+  font-size: 22px;
+  margin: 0;
+  font-weight: 800;
+}
+
+.dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #2563eb, #14b8a6);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+}
+
+#settings-btn {
+  background: rgba(0, 0, 0, 0.04);
+  border: none;
+  border-radius: 10px;
+  width: 34px;
+  height: 34px;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+main {
+  padding: 0 18px 18px;
+}
+
+.hint {
+  font-size: 14px;
+  color: #4b5563;
+  margin: 4px 0 12px;
+}
+
+textarea {
+  width: 100%;
+  font-size: 16px;
+  font-family: inherit;
+  border: 1.5px solid rgba(37, 99, 235, 0.3);
+  border-radius: 14px;
+  padding: 12px;
+  resize: vertical;
+  background: white;
+  outline: none;
+}
+
+textarea:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
+button {
+  font-family: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button.primary {
+  margin-top: 10px;
+  width: 100%;
+  height: 46px;
+  border: none;
+  border-radius: 14px;
+  background: #2563eb;
+  color: white;
+  font-size: 17px;
+  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.26);
+}
+
+button.primary:disabled {
+  background: #9ca3af;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  margin-top: 8px;
+  width: 100%;
+  height: 38px;
+  border: 1px solid #e5e7eb;
+  background: white;
+  border-radius: 10px;
+  font-size: 14px;
+}
+
+.hidden { display: none !important; }
+
+.status {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: #4b5563;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(37, 99, 235, 0.2);
+  border-top-color: #2563eb;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.log {
+  margin-top: 12px;
+  list-style: none;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.log li {
+  font-size: 13px;
+  color: #374151;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border-radius: 10px;
+  background: rgba(37, 99, 235, 0.05);
+  white-space: pre-wrap;
+}
+
+.log li.action { background: rgba(20, 184, 166, 0.08); }
+.log li.result { background: rgba(168, 85, 247, 0.07); }
+.log li.error { background: rgba(239, 68, 68, 0.1); color: #991b1b; }
+.log li.done { background: rgba(34, 197, 94, 0.1); color: #166534; font-weight: 700; }

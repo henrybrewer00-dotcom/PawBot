@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="popup.css" />
+  <title>Pawbot Browser</title>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="dot"></div>
+      <h1>Pawbot</h1>
+    </div>
+    <button id="settings-btn" title="Settings" aria-label="Settings">⚙</button>
+  </header>
+
+  <main>
+    <p class="hint" id="hint">
+      Tell me what you'd like done in your browser. I'll do it step by step.
+    </p>
+
+    <textarea
+      id="task"
+      placeholder="For example: open Netflix and help me sign in."
+      rows="3"
+      autocomplete="off"
+    ></textarea>
+
+    <button id="run-btn" class="primary">Go</button>
+    <button id="stop-btn" class="secondary hidden">Stop</button>
+
+    <div id="status" class="status hidden">
+      <div class="spinner"></div>
+      <span id="status-text">Working…</span>
+    </div>
+
+    <ul id="log" class="log"></ul>
+  </main>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
