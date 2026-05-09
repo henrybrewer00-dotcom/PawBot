@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Combine
+import SQLite3
 import Speech
 import SwiftUI
 
@@ -225,23 +226,34 @@ final class PawbotModel: ObservableObject {
     }
 
     func openMessages() {
-        appendBot("Opening Messages now — give it a second to come up.")
-        let bundleID = "com.apple.MobileSMS"
-        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-            appendBot("I couldn't find the Messages app on this Mac. You may need to open it from your Applications folder once.")
-            return
+        if !hasStartedConversation {
+            withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
         }
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = true
-        NSWorkspace.shared.openApplication(at: appURL, configuration: config) { [weak self] _, error in
-            Task { @MainActor in
-                guard let self else { return }
-                if let error {
-                    self.appendBot("I couldn't open Messages — \(error.localizedDescription)")
+        isPawbotThinking = true
+        Task { @MainActor in
+            do {
+                let recent = try await PawbotMessagesAPI.shared.recentMessages(limit: 8)
+                isPawbotThinking = false
+                if recent.isEmpty {
+                    appendBot("I checked your Messages but didn't find anything to read. Try sending or receiving a text first.")
                     return
                 }
-                try? await Task.sleep(for: .seconds(1))
-                self.lookAtScreen(prompt: "What does the message at the top of Messages say? Read it out so I can hear it clearly, then tell me who sent it.")
+                let summary = recent.map { msg in
+                    "• \(msg.prettySender) (\(msg.relativeTime)): \(msg.text)"
+                }.joined(separator: "\n")
+                appendBot("Here are your most recent texts:\n\n\(summary)")
+                let aiContext = "I just showed the user their most recent texts:\n\(summary)\n\nIf they ask about one of these, you already know the content. Offer to read one aloud or help draft a reply."
+                Task { await PawbotAI.shared.recordExchange(user: "[Pawbot read recent Messages from chat.db]", assistant: aiContext) }
+            } catch let error as PawbotMessagesError {
+                isPawbotThinking = false
+                appendBot(error.errorDescription ?? "I couldn't read your messages.")
+                if case .fullDiskAccessRequired = error {
+                    let url = URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles")
+                    if let url { NSWorkspace.shared.open(url) }
+                }
+            } catch {
+                isPawbotThinking = false
+                appendBot("Something went wrong reading your messages: \(error.localizedDescription)")
             }
         }
     }
@@ -347,7 +359,7 @@ final class PawbotModel: ObservableObject {
 
         if !isPawbotThinking { isPawbotThinking = true }
 
-        let basePrompt = "I'm helping an older adult use their computer. You're looking at their currently active window (whatever app they're focused on). In 2-3 short, friendly sentences, plainly describe what's in that window and what they might want help with. No jargon."
+        let basePrompt = "I'm helping an older adult use their computer. You're looking at their full screen with everything they have open right now. In 2-3 short, friendly sentences, plainly describe what's on the screen and what they might want help with. No jargon."
         let prompt: String
         if let customPrompt, !customPrompt.isEmpty {
             prompt = "\(basePrompt)\n\nThey just asked: \"\(customPrompt)\". Answer that specifically based on what's on the screen."
@@ -1337,6 +1349,119 @@ final class PawbotVoiceInput {
     }
 }
 
+struct PawbotMessageRecord: Identifiable {
+    let id: Int64
+    let text: String
+    let sender: String
+    let isFromMe: Bool
+    let date: Date
+
+    var prettySender: String {
+        if isFromMe { return "You" }
+        if sender.contains("@") { return sender }
+        return sender
+    }
+
+    var relativeTime: String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+enum PawbotMessagesError: Error, LocalizedError {
+    case cannotOpenDB
+    case fullDiskAccessRequired
+    case queryFailed(String)
+    case sendFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .cannotOpenDB: return "Couldn't find the Messages database."
+        case .fullDiskAccessRequired: return "Pawbot needs Full Disk Access to read your texts. Open System Settings → Privacy & Security → Full Disk Access and turn on Pawbot."
+        case .queryFailed(let s): return "Trouble reading messages: \(s)"
+        case .sendFailed(let s): return "Couldn't send the message: \(s)"
+        }
+    }
+}
+
+actor PawbotMessagesAPI {
+    static let shared = PawbotMessagesAPI()
+
+    private let dbPath: String = {
+        NSString(string: "~/Library/Messages/chat.db").expandingTildeInPath
+    }()
+
+    func recentMessages(limit: Int = 8) throws -> [PawbotMessageRecord] {
+        guard FileManager.default.fileExists(atPath: dbPath) else {
+            throw PawbotMessagesError.cannotOpenDB
+        }
+        guard FileManager.default.isReadableFile(atPath: dbPath) else {
+            throw PawbotMessagesError.fullDiskAccessRequired
+        }
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            throw PawbotMessagesError.fullDiskAccessRequired
+        }
+        defer { sqlite3_close(db) }
+
+        let query = """
+            SELECT m.ROWID, m.text, h.id, m.is_from_me, m.date
+            FROM message m
+            LEFT JOIN handle h ON m.handle_id = h.ROWID
+            WHERE m.text IS NOT NULL AND length(m.text) > 0
+            ORDER BY m.date DESC
+            LIMIT \(limit);
+        """
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            if msg.contains("authoriz") || msg.contains("not authorized") {
+                throw PawbotMessagesError.fullDiskAccessRequired
+            }
+            throw PawbotMessagesError.queryFailed(msg)
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var results: [PawbotMessageRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = sqlite3_column_int64(stmt, 0)
+            let text = sqlite3_column_text(stmt, 1).flatMap { String(cString: $0) } ?? ""
+            let sender = sqlite3_column_text(stmt, 2).flatMap { String(cString: $0) } ?? "Unknown"
+            let isFromMe = sqlite3_column_int(stmt, 3) == 1
+            let appleNanos = sqlite3_column_int64(stmt, 4)
+            let secondsSinceAppleEpoch = TimeInterval(appleNanos) / 1_000_000_000
+            let date = Date(timeIntervalSinceReferenceDate: secondsSinceAppleEpoch)
+            results.append(.init(id: id, text: text, sender: sender, isFromMe: isFromMe, date: date))
+        }
+        return results
+    }
+
+    func sendMessage(to recipient: String, text: String) throws {
+        let escapedText = text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedRecipient = recipient
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let source = """
+        tell application "Messages"
+            set targetService to 1st service whose service type = iMessage
+            set targetBuddy to buddy "\(escapedRecipient)" of targetService
+            send "\(escapedText)" to targetBuddy
+        end tell
+        """
+        var error: NSDictionary?
+        let script = NSAppleScript(source: source)
+        _ = script?.executeAndReturnError(&error)
+        if let error {
+            let msg = (error[NSAppleScript.errorMessage] as? String) ?? error.description
+            throw PawbotMessagesError.sendFailed(msg)
+        }
+    }
+}
+
 enum PawbotConsent {
     @MainActor static var userConsentedThisSession = false
 
@@ -1407,7 +1532,7 @@ enum PawbotScreenCapture {
 
     @MainActor
     static func tryCapture() -> NSImage? {
-        tryCaptureActiveWindow() ?? tryCaptureFullScreen()
+        tryCaptureFullScreen() ?? tryCaptureActiveWindow()
     }
 
     @MainActor
