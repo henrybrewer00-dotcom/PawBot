@@ -1652,6 +1652,17 @@ struct PawbotGmailMessage: Decodable, Identifiable {
     let subject: String
     let snippet: String
     let date: String?
+
+    enum CodingKeys: String, CodingKey { case id, from, subject, snippet, date }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        from = (try? c.decode(String.self, forKey: .from)) ?? "Unknown"
+        subject = (try? c.decode(String.self, forKey: .subject)) ?? "(no subject)"
+        snippet = (try? c.decode(String.self, forKey: .snippet)) ?? ""
+        date = try? c.decodeIfPresent(String.self, forKey: .date)
+    }
 }
 
 struct PawbotCalendarEvent: Decodable, Identifiable {
@@ -1661,6 +1672,18 @@ struct PawbotCalendarEvent: Decodable, Identifiable {
     let end: String?
     let location: String?
     let description: String?
+
+    enum CodingKeys: String, CodingKey { case id, title, start, end, location, description }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        title = (try? c.decode(String.self, forKey: .title)) ?? "(no title)"
+        start = try? c.decodeIfPresent(String.self, forKey: .start)
+        end = try? c.decodeIfPresent(String.self, forKey: .end)
+        location = try? c.decodeIfPresent(String.self, forKey: .location)
+        description = try? c.decodeIfPresent(String.self, forKey: .description)
+    }
 }
 
 struct PawbotScamAlert: Decodable, Identifiable {
@@ -1671,6 +1694,19 @@ struct PawbotScamAlert: Decodable, Identifiable {
     let subject: String
     let snippet: String
     let detectedAt: String
+
+    enum CodingKeys: String, CodingKey { case id, verdict, reason, from, subject, snippet, detectedAt }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        verdict = (try? c.decode(String.self, forKey: .verdict)) ?? "SUSPICIOUS"
+        reason = (try? c.decode(String.self, forKey: .reason)) ?? ""
+        from = (try? c.decode(String.self, forKey: .from)) ?? "Unknown"
+        subject = (try? c.decode(String.self, forKey: .subject)) ?? "(no subject)"
+        snippet = (try? c.decode(String.self, forKey: .snippet)) ?? ""
+        detectedAt = (try? c.decode(String.self, forKey: .detectedAt)) ?? ""
+    }
 }
 
 struct PawbotScamAlertsResponse: Decodable {
@@ -1683,6 +1719,17 @@ struct PawbotMorningBrief: Decodable {
     let brief: String?
     let eventsCount: Int?
     let emailsCount: Int?
+
+    enum CodingKeys: String, CodingKey { case date, generatedAt, brief, eventsCount, emailsCount }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        date = (try? c.decode(String.self, forKey: .date)) ?? ""
+        generatedAt = try? c.decodeIfPresent(String.self, forKey: .generatedAt)
+        brief = try? c.decodeIfPresent(String.self, forKey: .brief)
+        eventsCount = try? c.decodeIfPresent(Int.self, forKey: .eventsCount)
+        emailsCount = try? c.decodeIfPresent(Int.self, forKey: .emailsCount)
+    }
 }
 
 struct PawbotMorningBriefHistory: Decodable {
@@ -1694,6 +1741,7 @@ enum PawbotBackendError: Error, LocalizedError {
     case gmailNotConfigured
     case calendarNotConfigured
     case badResponse(Int, String)
+    case decodeFailed(path: String, detail: String, rawSnippet: String)
 
     var errorDescription: String? {
         switch self {
@@ -1701,6 +1749,8 @@ enum PawbotBackendError: Error, LocalizedError {
         case .gmailNotConfigured: return "Gmail isn't connected yet. Set COMPOSIO_API_KEY and connect Gmail in Composio."
         case .calendarNotConfigured: return "Calendar isn't connected yet. Set COMPOSIO_API_KEY and connect Google Calendar in Composio."
         case .badResponse(let code, let body): return "Backend returned HTTP \(code): \(body.prefix(160))"
+        case .decodeFailed(let path, let detail, let raw):
+            return "Couldn't decode response from \(path).\nReason: \(detail)\nGot: \(raw)"
         }
     }
 }
@@ -1731,7 +1781,13 @@ actor PawbotBackend {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw PawbotBackendError.badResponse(http.statusCode, body)
         }
-        return try JSONDecoder().decode(T.self, from: data)
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            let body = String(data: data, encoding: .utf8) ?? "<binary>"
+            NSLog("[Pawbot] Decode failure on %@: %@\nRaw: %@", path, "\(error)", body.prefix(500) as CVarArg)
+            throw PawbotBackendError.decodeFailed(path: path, detail: "\(error)", rawSnippet: String(body.prefix(280)))
+        }
     }
 
     func recentGmail(limit: Int = 5) async throws -> [PawbotGmailMessage] {

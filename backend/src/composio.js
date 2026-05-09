@@ -74,6 +74,23 @@ function pickHeader(message, name) {
   return hit?.value ?? hit?.Value ?? null;
 }
 
+function asString(value, fallback = "") {
+  if (value == null) return fallback;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map((v) => asString(v, "")).filter(Boolean).join(", ");
+  if (typeof value === "object") {
+    if (typeof value.email === "string" && typeof value.name === "string") return `${value.name} <${value.email}>`;
+    try { return JSON.stringify(value).slice(0, 240); } catch { return fallback; }
+  }
+  return fallback;
+}
+
+function asNullableString(value) {
+  if (value == null) return null;
+  return asString(value, "") || null;
+}
+
 export async function fetchGmailRecent(limit = 5) {
   const result = await composioExecute("GMAIL_FETCH_EMAILS", {
     max_results: limit,
@@ -82,11 +99,11 @@ export async function fetchGmailRecent(limit = 5) {
   });
   const list = findArray(result, ["messages", "emails", "results", "items"]) ?? [];
   const mapped = list.map((m) => ({
-    id: pickField(m, ["id", "messageId", "message_id", "thread_id", "threadId"]) ?? "",
-    from: pickField(m, ["from", "sender", "fromEmail", "from_email"]) ?? pickHeader(m, "From") ?? "Unknown",
-    subject: pickField(m, ["subject", "Subject", "title"]) ?? pickHeader(m, "Subject") ?? "(no subject)",
-    snippet: pickField(m, ["snippet", "preview", "messageText", "message_text", "body.text", "bodyText", "body"]) ?? "",
-    date: pickField(m, ["date", "receivedAt", "messageTimestamp", "internalDate", "timestamp"]) ?? pickHeader(m, "Date") ?? null
+    id: asString(pickField(m, ["id", "messageId", "message_id", "thread_id", "threadId"]), ""),
+    from: asString(pickField(m, ["from", "sender", "fromEmail", "from_email"]) ?? pickHeader(m, "From"), "Unknown"),
+    subject: asString(pickField(m, ["subject", "Subject", "title"]) ?? pickHeader(m, "Subject"), "(no subject)"),
+    snippet: asString(pickField(m, ["snippet", "preview", "messageText", "message_text", "body.text", "bodyText", "body"]), ""),
+    date: asNullableString(pickField(m, ["date", "receivedAt", "messageTimestamp", "internalDate", "timestamp"]) ?? pickHeader(m, "Date"))
   })).filter((m) => m.id || m.subject !== "(no subject)");
   return mapped;
 }
@@ -101,12 +118,12 @@ export async function fetchCalendarUpcoming(limit = 5) {
   });
   const list = findArray(result, ["items", "events", "results", "eventList"]) ?? [];
   return list.map((e) => ({
-    id: pickField(e, ["id", "eventId", "event_id"]) ?? "",
-    title: pickField(e, ["summary", "title", "eventName", "event_name"]) ?? "(no title)",
-    start: pickField(e, ["start.dateTime", "start.date", "startTime", "start_time", "start"]) ?? null,
-    end: pickField(e, ["end.dateTime", "end.date", "endTime", "end_time", "end"]) ?? null,
-    location: pickField(e, ["location", "venue"]) ?? null,
-    description: pickField(e, ["description", "notes"]) ?? null
+    id: asString(pickField(e, ["id", "eventId", "event_id"]), ""),
+    title: asString(pickField(e, ["summary", "title", "eventName", "event_name"]), "(no title)"),
+    start: asNullableString(pickField(e, ["start.dateTime", "start.date", "startTime", "start_time", "start"])),
+    end: asNullableString(pickField(e, ["end.dateTime", "end.date", "endTime", "end_time", "end"])),
+    location: asNullableString(pickField(e, ["location", "venue"])),
+    description: asNullableString(pickField(e, ["description", "notes"]))
   })).filter((e) => e.id || e.title !== "(no title)");
 }
 

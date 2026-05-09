@@ -367,7 +367,14 @@ export function createRouter(store) {
   }));
 
   router.get("/api/morning-brief/today", (req, res) => {
-    res.json(getCachedMorningBrief() ?? { brief: null });
+    const cached = getCachedMorningBrief();
+    res.json(cached ?? {
+      date: new Date().toISOString().slice(0, 10),
+      generatedAt: null,
+      brief: null,
+      eventsCount: 0,
+      emailsCount: 0
+    });
   });
 
   router.get("/api/morning-brief/history", (req, res) => {
