@@ -3,11 +3,13 @@ import test from "node:test";
 import {
   createMedication,
   createUser,
+  getSeniorPersonalInfo,
   getTodayMedicationStatus,
   handleIncomingTextReply,
   linkCaretakerToSenior,
   runMedicationAgentTick,
-  upsertSeniorForLink
+  upsertSeniorForLink,
+  upsertSeniorPersonalInfo
 } from "../src/domain.js";
 import {
   normalizeEmail,
@@ -23,7 +25,8 @@ const emptyState = () => ({
   calendarEvents: [],
   scamAlerts: [],
   agentLogs: [],
-  hyperspellConnections: []
+  hyperspellConnections: [],
+  seniorPersonalInfo: []
 });
 
 class MemoryStore {
@@ -170,4 +173,26 @@ test("upsertSeniorForLink creates a senior when the email is not already in user
   assert.equal(senior.email, "brewert1@uci.edu");
   assert.equal(store.state.users.length, 1);
   assert.equal(store.state.users[0].email, "brewert1@uci.edu");
+});
+
+test("senior personal info saves public metadata and agent-readable credentials", async () => {
+  const store = new MemoryStore();
+  const senior = await createUser(store, {
+    name: "Demo Senior",
+    phone: "+15550000001",
+    email: "senior@example.com",
+    role: "senior"
+  });
+
+  const saved = await upsertSeniorPersonalInfo(store, senior.id, {
+    email: "personal@example.com",
+    password: "demo-password"
+  });
+  const publicInfo = await getSeniorPersonalInfo(store, senior.id);
+  const agentInfo = await getSeniorPersonalInfo(store, senior.id, { includePassword: true });
+
+  assert.equal(saved.email, "personal@example.com");
+  assert.equal(saved.hasPassword, true);
+  assert.equal(publicInfo.password, undefined);
+  assert.equal(agentInfo.password, "demo-password");
 });

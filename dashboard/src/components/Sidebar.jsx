@@ -3,6 +3,7 @@ import { useApp } from '../App.jsx'
 const NAV_ITEMS = [
   { id: 'overview',     icon: '⌂',  label: 'Overview' },
   { id: 'medications',  icon: '💊', label: 'Medications', seniorOnly: true },
+  { id: 'personal',     icon: '☷',  label: 'Personal Info', seniorOnly: true },
   { id: 'integrations', icon: '🔗', label: 'Integrations' },
   { id: 'alerts',       icon: '🛡', label: 'Alerts & Memory' },
 ]

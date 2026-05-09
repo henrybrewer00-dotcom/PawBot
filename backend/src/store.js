@@ -8,7 +8,8 @@ const TABLES = {
   calendarEvents: "calendar_events",
   scamAlerts: "scam_alerts",
   agentLogs: "agent_logs",
-  hyperspellConnections: "hyperspell_connections"
+  hyperspellConnections: "hyperspell_connections",
+  seniorPersonalInfo: "senior_personal_info"
 };
 
 const toSnake = (s) => s.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);

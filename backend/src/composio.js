@@ -11,16 +11,16 @@ export async function composioExecute(actionName, input = {}, opts = {}) {
     err.code = "composio_not_configured";
     throw err;
   }
-  const body = { input };
+  const body = { arguments: input };
   const explicitConn = opts.connectedAccountId ?? process.env.COMPOSIO_CONNECTED_ACCOUNT_ID;
-  if (explicitConn) body.connectedAccountId = explicitConn;
-  const explicitEntity = opts.entityId ?? process.env.COMPOSIO_ENTITY_ID ?? "default";
-  if (explicitEntity) body.entityId = explicitEntity;
+  if (explicitConn) body.connected_account_id = explicitConn;
+  const userId = opts.userId ?? process.env.COMPOSIO_USER_ID ?? process.env.COMPOSIO_ENTITY_ID ?? "default";
+  if (userId) body.user_id = userId;
 
-  const res = await fetch(`${COMPOSIO_BASE}/actions/${actionName}/execute`, {
+  const base = COMPOSIO_BASE.replace(/\/+$/, "");
+  const res = await fetch(`${base}/tools/execute/${encodeURIComponent(actionName)}`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
       "x-api-key": apiKey,
       "Content-Type": "application/json"
     },

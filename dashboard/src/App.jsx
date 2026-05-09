@@ -11,6 +11,7 @@ import Overview from './pages/Overview.jsx'
 import Medications from './pages/Medications.jsx'
 import Integrations from './pages/Integrations.jsx'
 import AlertsMemory from './pages/AlertsMemory.jsx'
+import PersonalInformation from './pages/PersonalInformation.jsx'
 import { api } from './api.js'
 import { insforge } from './insforge.js'
 
@@ -20,6 +21,7 @@ export const useApp = () => useContext(AppContext)
 const PAGES = {
   overview: Overview,
   medications: Medications,
+  personal: PersonalInformation,
   integrations: Integrations,
   alerts: AlertsMemory,
 }

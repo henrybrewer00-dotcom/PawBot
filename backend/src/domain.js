@@ -160,6 +160,60 @@ export async function upsertSeniorForLink(store, identifier, timezone = "America
   });
 }
 
+function publicPersonalInfo(info) {
+  if (!info) return null;
+  return {
+    id: info.id,
+    seniorId: info.seniorId,
+    email: info.email,
+    hasPassword: Boolean(info.password),
+    updatedAt: info.updatedAt,
+    createdAt: info.createdAt
+  };
+}
+
+export async function getSeniorPersonalInfo(store, seniorId, { includePassword = false } = {}) {
+  const senior = await store.find("users", (user) => user.id === seniorId && user.role === "senior");
+  if (!senior) throw new HttpError(404, "Senior not found");
+
+  const info = await store.find("seniorPersonalInfo", (item) => item.seniorId === seniorId);
+  if (!info) return null;
+  return includePassword ? info : publicPersonalInfo(info);
+}
+
+export async function upsertSeniorPersonalInfo(store, seniorId, body) {
+  const senior = await store.find("users", (user) => user.id === seniorId && user.role === "senior");
+  if (!senior) throw new HttpError(404, "Senior not found");
+
+  const email = String(body.email ?? "").trim();
+  if (!email) throw new HttpError(400, "email is required");
+
+  const existing = await store.find("seniorPersonalInfo", (item) => item.seniorId === seniorId);
+  const now = new Date().toISOString();
+  const changes = {
+    email,
+    updatedAt: now
+  };
+  if (body.password !== undefined) {
+    changes.password = String(body.password);
+  }
+
+  if (existing) {
+    const updated = await store.update("seniorPersonalInfo", existing.id, changes);
+    return publicPersonalInfo(updated);
+  }
+
+  const created = await store.insert("seniorPersonalInfo", {
+    id: createId("pinfo"),
+    seniorId,
+    email,
+    password: String(body.password ?? ""),
+    createdAt: now,
+    updatedAt: now
+  });
+  return publicPersonalInfo(created);
+}
+
 export async function createMedication(store, body) {
   const senior = await store.find("users", (user) => user.id === body.seniorId && user.role === "senior");
   const creator = await store.find("users", (user) => user.id === body.createdBy);

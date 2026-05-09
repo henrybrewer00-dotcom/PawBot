@@ -6,34 +6,32 @@ import StatusPill from '../components/StatusPill.jsx'
 const PROVIDERS = [
   {
     id: 'google_calendar',
-    name: 'Google Calendar',
+    name: 'Google Calendar via Composio',
     icon: '📅',
-    desc: 'Sync upcoming appointments and events for automated daily reminders.',
+    desc: 'Read upcoming appointments and events from the backend Composio connection.',
   },
   {
     id: 'google_mail',
-    name: 'Gmail',
+    name: 'Gmail via Composio',
     icon: '📧',
-    desc: 'Scan emails for phishing attempts, scam solicitations, and unusual requests.',
+    desc: 'Read recent Gmail and generate a morning brief with Composio and Grok.',
   },
 ]
 
-function normalizeProvider(value) {
-  const key = String(value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
-  if (key === 'gmail' || key === 'google_mail' || key.includes('gmail') || (key.includes('google') && key.includes('mail'))) {
-    return 'google_mail'
-  }
-  if (key === 'google_calendar' || key.includes('calendar')) return 'google_calendar'
-  return key
-}
-
 export default function Integrations() {
   const { seniorId, toast } = useApp()
-  const [connections, setConnections]   = useState([])
+  const [calendarStatus, setCalendarStatus] = useState('unknown')
+  const [calendarEvents, setCalendarEvents] = useState([])
+  const [gmailStatus, setGmailStatus]   = useState('unknown')
+  const [gmailMessages, setGmailMessages] = useState([])
   const [loading, setLoading]           = useState(true)
   const [syncing, setSyncing]           = useState(false)
   const [summarizing, setSummarizing]   = useState(false)
   const [emailSummary, setEmailSummary] = useState(null)
+  const [personalInfo, setPersonalInfo] = useState(null)
+  const [personalEmail, setPersonalEmail] = useState('')
+  const [personalPassword, setPersonalPassword] = useState('')
+  const [savingPersonal, setSavingPersonal] = useState(false)
   const [connecting, setConnecting]     = useState({})
   const refreshTimer = useRef(null)
 
@@ -41,7 +39,31 @@ export default function Integrations() {
     if (!seniorId) return
     if (showLoading) setLoading(true)
     try {
-      setConnections(await api(`/api/seniors/${seniorId}/hyperspell/connections`))
+      const [calendar, gmail, info] = await Promise.all([
+        api('/api/calendar/upcoming?limit=8')
+          .then(events => ({ ok: true, events }))
+          .catch(error => ({ ok: false, error })),
+        api('/api/gmail/recent?limit=5')
+          .then(messages => ({ ok: true, messages }))
+          .catch(error => ({ ok: false, error })),
+        api(`/api/seniors/${seniorId}/personal-info`).catch(() => ({ personalInfo: null })),
+      ])
+      setPersonalInfo(info.personalInfo)
+      setPersonalEmail(info.personalInfo?.email ?? '')
+      if (calendar.ok) {
+        setCalendarEvents(calendar.events)
+        setCalendarStatus('connected')
+      } else {
+        setCalendarEvents([])
+        setCalendarStatus('unavailable')
+      }
+      if (gmail.ok) {
+        setGmailMessages(gmail.messages)
+        setGmailStatus('connected')
+      } else {
+        setGmailMessages([])
+        setGmailStatus('unavailable')
+      }
     } catch (e) {
       if (showError) toast(e.message, 'error')
     } finally {
@@ -69,42 +91,72 @@ export default function Integrations() {
   }, [fetchConnections])
 
   const handleConnect = async (providerId) => {
-    setConnecting(prev => ({ ...prev, [providerId]: true }))
-    try {
-      const res = await api(`/api/seniors/${seniorId}/hyperspell/connect`, {
-        method: 'POST',
-        body: { provider: providerId },
-      })
-      if (res.url) {
-        window.open(res.url, '_blank')
-        toast('Google authorization opened in a new tab. Return here after granting access.', 'info')
-        if (refreshTimer.current) window.clearInterval(refreshTimer.current)
-        let attempts = 0
-        refreshTimer.current = window.setInterval(() => {
-          attempts += 1
-          fetchConnections(false, false)
-          if (attempts >= 20) {
-            window.clearInterval(refreshTimer.current)
-            refreshTimer.current = null
-          }
-        }, 3000)
-      } else {
-        toast('No OAuth URL returned — check Hyperspell configuration.', 'error')
+    if (providerId === 'google_calendar') {
+      setConnecting(prev => ({ ...prev, [providerId]: true }))
+      try {
+        const events = await api('/api/calendar/upcoming?limit=8')
+        setCalendarEvents(events)
+        setCalendarStatus('connected')
+        toast(`Composio Calendar returned ${events.length} upcoming event${events.length === 1 ? '' : 's'}.`)
+      } catch (e) {
+        setCalendarStatus('unavailable')
+        toast(e.message, 'error')
+      } finally {
+        setConnecting(prev => ({ ...prev, [providerId]: false }))
       }
+      return
+    }
+
+    if (providerId === 'google_mail') {
+      setConnecting(prev => ({ ...prev, [providerId]: true }))
+      try {
+        const messages = await api('/api/gmail/recent?limit=5')
+        setGmailMessages(messages)
+        setGmailStatus('connected')
+        toast(`Composio Gmail returned ${messages.length} recent message${messages.length === 1 ? '' : 's'}.`)
+      } catch (e) {
+        setGmailStatus('unavailable')
+        toast(e.message, 'error')
+      } finally {
+        setConnecting(prev => ({ ...prev, [providerId]: false }))
+      }
+      return
+    }
+  }
+
+  const handlePersonalSave = async (event) => {
+    event.preventDefault()
+    setSavingPersonal(true)
+    try {
+      const body = { email: personalEmail }
+      if (personalPassword) body.password = personalPassword
+      const res = await api(`/api/seniors/${seniorId}/personal-info`, {
+        method: 'PUT',
+        body,
+      })
+      setPersonalInfo(res.personalInfo)
+      setPersonalEmail(res.personalInfo?.email ?? personalEmail)
+      setPersonalPassword('')
+      toast('Senior personal info saved for agents.')
     } catch (e) {
       toast(e.message, 'error')
     } finally {
-      setConnecting(prev => ({ ...prev, [providerId]: false }))
+      setSavingPersonal(false)
     }
   }
 
   const handleSyncAll = async () => {
     setSyncing(true)
     try {
-      const res = await api(`/api/seniors/${seniorId}/hyperspell/sync`, { method: 'POST' })
-      const ev = res.calendarEvents ?? 0
-      const sc = res.scamAlerts ?? 0
-      toast(`Synced ${ev} calendar event${ev !== 1 ? 's' : ''} · ${sc} scam alert${sc !== 1 ? 's' : ''}.`)
+      const [events, messages] = await Promise.all([
+        api('/api/calendar/upcoming?limit=8').catch(() => calendarEvents),
+        api('/api/gmail/recent?limit=5').catch(() => gmailMessages),
+      ])
+      setCalendarEvents(events)
+      setCalendarStatus(Array.isArray(events) ? 'connected' : calendarStatus)
+      setGmailMessages(messages)
+      setGmailStatus(Array.isArray(messages) ? 'connected' : gmailStatus)
+      toast(`Checked ${Array.isArray(events) ? events.length : 0} calendar event${Array.isArray(events) && events.length === 1 ? '' : 's'} · ${Array.isArray(messages) ? messages.length : 0} Gmail message${Array.isArray(messages) && messages.length === 1 ? '' : 's'}.`)
       fetchConnections(false, false)
     } catch (e) {
       toast(e.message, 'error')
@@ -116,12 +168,12 @@ export default function Integrations() {
   const handleEmailSummary = async () => {
     setSummarizing(true)
     try {
-      const res = await api(`/api/seniors/${seniorId}/hyperspell/email-summary`, {
-        method: 'POST',
-        body: { days: 2 },
-      })
+      const res = await api('/api/morning-brief?force=true')
       setEmailSummary(res)
-      toast(`Email summary found ${res.importantCount ?? 0} important item${res.importantCount === 1 ? '' : 's'} and marked ${res.scamCount ?? 0} scam${res.scamCount === 1 ? '' : 's'}.`)
+      const messages = await api('/api/gmail/recent?limit=5').catch(() => gmailMessages)
+      setGmailMessages(messages)
+      setGmailStatus('connected')
+      toast(`Morning brief generated from ${res.emailsCount ?? messages.length ?? 0} recent email${(res.emailsCount ?? messages.length) === 1 ? '' : 's'}.`)
     } catch (e) {
       toast(e.message, 'error')
     } finally {
@@ -129,9 +181,9 @@ export default function Integrations() {
     }
   }
 
-  const getConn = (id) => connections.find(c => normalizeProvider(c.provider ?? c.source) === id)
-  const anyConnected = connections.length > 0
-  const gmailConnected = !!getConn('google_mail')
+  const calendarConnected = calendarStatus === 'connected'
+  const anyConnected = calendarConnected || gmailStatus === 'connected'
+  const gmailConnected = gmailStatus === 'connected'
 
   if (!seniorId) return (
     <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
@@ -161,33 +213,39 @@ export default function Integrations() {
         ) : (
           <div className="provider-grid stagger">
             {PROVIDERS.map(p => {
-              const conn = getConn(p.id)
-              const connected = !!conn
+              const providerConnected = p.id === 'google_calendar' ? calendarConnected : gmailConnected
               const busy = !!connecting[p.id]
 
               return (
-                <div key={p.id} className={`provider-card glass-card${connected ? ' is-connected' : ''}`}>
+                <div key={p.id} className={`provider-card glass-card${providerConnected ? ' is-connected' : ''}`}>
                   <div className="pc-head">
                     <div className="pc-icon-box">
                       <span className="pc-icon">{p.icon}</span>
                     </div>
                     <div>
                       <h3 className="pc-name">{p.name}</h3>
-                      <StatusPill status={connected ? 'connected' : 'disconnected'} />
+                      <StatusPill status={providerConnected ? 'connected' : 'disconnected'} />
                     </div>
                   </div>
                   <p className="pc-desc">{p.desc}</p>
-                  {connected && conn.lastSynced && (
+                  {p.id === 'google_calendar' && providerConnected && (
                     <p className="pc-synced">
-                      Last synced {new Date(conn.lastSynced).toLocaleString()}
+                      {calendarEvents.length} upcoming event{calendarEvents.length === 1 ? '' : 's'}
+                    </p>
+                  )}
+                  {p.id === 'google_mail' && providerConnected && (
+                    <p className="pc-synced">
+                      {gmailMessages.length} recent message{gmailMessages.length === 1 ? '' : 's'}
                     </p>
                   )}
                   <button
-                    className={`glass-btn${connected ? '' : ' primary'}`}
+                    className={`glass-btn${providerConnected ? '' : ' primary'}`}
                     onClick={() => handleConnect(p.id)}
                     disabled={busy}
                   >
-                    {busy ? '⟳ Opening…' : connected ? '⟳ Reconnect' : '→ Connect with Google'}
+                    {p.id === 'google_mail'
+                      ? (busy ? '⟳ Checking…' : providerConnected ? '⟳ Check Gmail' : 'Check Composio Gmail')
+                      : (busy ? '⟳ Checking…' : providerConnected ? '⟳ Check Calendar' : 'Check Composio Calendar')}
                   </button>
                 </div>
               )
@@ -198,11 +256,11 @@ export default function Integrations() {
         {gmailConnected && (
           <div className="email-agent-panel glass-card">
             <div>
-              <h2>Email summary agent</h2>
-              <p>Review recent Gmail, summarize important messages, and mark scam-like emails as PawBot scam alerts.</p>
+              <h2>Morning brief</h2>
+              <p>Uses Composio Gmail and Calendar, then Grok writes the daily summary.</p>
             </div>
             <button className="glass-btn primary" onClick={handleEmailSummary} disabled={summarizing}>
-              {summarizing ? '⟳ Reviewing…' : 'Run Email Summary'}
+              {summarizing ? '⟳ Generating…' : 'Generate Brief'}
             </button>
           </div>
         )}
@@ -210,31 +268,61 @@ export default function Integrations() {
         {emailSummary && (
           <div className="email-summary glass-card">
             <div className="es-head">
-              <h2>Recent email summary</h2>
-              <span>{emailSummary.importantCount} important · {emailSummary.scamCount} scam</span>
+              <h2>Morning brief</h2>
+              <span>{emailSummary.emailsCount ?? gmailMessages.length} emails · {emailSummary.eventsCount ?? 0} events</span>
             </div>
-            <p className="es-summary">{emailSummary.summary}</p>
-            {!!emailSummary.scamAlerts?.length && (
-              <div className="es-scams">
-                {emailSummary.scamAlerts.map(alert => (
-                  <div key={alert.id} className="es-scam">
-                    <span>{alert.riskLevel}</span>
-                    <p>{alert.summary}</p>
-                  </div>
-                ))}
-              </div>
-            )}
+            <p className="es-summary">{emailSummary.brief}</p>
           </div>
         )}
+
+        <form className="personal-info glass-card" onSubmit={handlePersonalSave}>
+          <div className="pi-head">
+            <div>
+              <h2>Senior Personal Info</h2>
+              <p>Email and password saved here are available to backend agents through the agent personal-info endpoint.</p>
+            </div>
+            {personalInfo?.updatedAt && (
+              <span>Updated {new Date(personalInfo.updatedAt).toLocaleString()}</span>
+            )}
+          </div>
+          <div className="pi-grid">
+            <label className="pi-label">
+              <span className="field-label">Email</span>
+              <input
+                className="glass-input"
+                type="email"
+                value={personalEmail}
+                onChange={e => setPersonalEmail(e.target.value)}
+                placeholder="senior@example.com"
+                required
+              />
+            </label>
+            <label className="pi-label">
+              <span className="field-label">Password</span>
+              <input
+                className="glass-input"
+                type="password"
+                value={personalPassword}
+                onChange={e => setPersonalPassword(e.target.value)}
+                placeholder={personalInfo?.hasPassword ? 'Saved password unchanged' : 'Enter password'}
+              />
+            </label>
+          </div>
+          <div className="pi-actions">
+            <span>{personalInfo?.hasPassword ? 'Password saved for agent use.' : 'No password saved yet.'}</span>
+            <button className="glass-btn primary" type="submit" disabled={savingPersonal}>
+              {savingPersonal ? 'Saving…' : 'Save Info'}
+            </button>
+          </div>
+        </form>
 
         <div className="info-panel glass-card">
           <span className="info-glyph">ℹ</span>
           <div>
             <p className="info-title">How Google integration works</p>
             <p className="info-body">
-              Clicking "Connect" opens a Google authorization page via Hyperspell OAuth. After the senior (or caretaker)
-              grants access, PawBot pulls upcoming calendar events for reminders and scans Gmail for potential scam
-              patterns. Use "Sync All" to refresh on demand, or wait for the automatic 6-hour background cycle.
+              Google Calendar and Gmail both use the Composio connection configured on the backend. The dashboard checks
+              the live connected account for upcoming events and recent emails, then Grok writes the morning brief.
             </p>
           </div>
         </div>
@@ -258,6 +346,21 @@ export default function Integrations() {
         .es-head { display: flex; justify-content: space-between; gap: 14px; align-items: baseline; margin-bottom: 10px; }
         .es-head span { font-size: 12px; color: var(--text-tertiary); white-space: nowrap; }
         .es-summary { white-space: pre-wrap; font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
+        .personal-info { padding: 18px 20px; margin-bottom: 14px; }
+        .pi-head {
+          display: flex; align-items: flex-start; justify-content: space-between;
+          gap: 14px; margin-bottom: 15px;
+        }
+        .pi-head h2 { font-size: 14px; margin-bottom: 5px; }
+        .pi-head p { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+        .pi-head span { font-size: 11.5px; color: var(--text-tertiary); white-space: nowrap; }
+        .pi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+        .pi-label { display: flex; flex-direction: column; gap: 5px; }
+        .pi-actions {
+          display: flex; align-items: center; justify-content: space-between;
+          gap: 12px; flex-wrap: wrap;
+        }
+        .pi-actions span { font-size: 12px; color: var(--text-tertiary); }
         .es-scams { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
         .es-scam { padding: 10px 12px; border: 1px solid rgba(255,71,87,0.25); border-radius: 8px; background: var(--danger-dim); }
         .es-scam span { display: block; color: var(--danger); font-size: 11px; font-weight: 700; text-transform: uppercase; margin-bottom: 4px; }
@@ -293,6 +396,8 @@ export default function Integrations() {
         @media (max-width: 560px) {
           .provider-grid { grid-template-columns: 1fr; }
           .email-agent-panel { align-items: stretch; flex-direction: column; }
+          .pi-grid { grid-template-columns: 1fr; }
+          .pi-head { flex-direction: column; }
         }
       `}</style>
     </>

@@ -31,12 +31,22 @@ const LOG_ICON = {
   text_reply_received:       '📩',
 }
 
+function eventStart(event) {
+  return event?.start ?? event?.date
+}
+
 export default function Overview() {
-  const { seniorId, account } = useApp()
+  const { seniorId, account, toast, setPage } = useApp()
   const [medStatus, setMedStatus]     = useState(null)
   const [agentLogs, setAgentLogs]     = useState(null)
   const [events, setEvents]           = useState(null)
   const [scamAlerts, setScamAlerts]   = useState(null)
+  const [calendarStatus, setCalendarStatus] = useState('unknown')
+  const [gmailMessages, setGmailMessages] = useState([])
+  const [gmailStatus, setGmailStatus] = useState('unknown')
+  const [morningBrief, setMorningBrief] = useState(null)
+  const [syncing, setSyncing] = useState(false)
+  const [briefing, setBriefing] = useState(false)
   const [loading, setLoading]         = useState(true)
   const [error, setError]             = useState(null)
   const [refreshKey, setRefreshKey]   = useState(0)
@@ -46,16 +56,36 @@ export default function Overview() {
     setLoading(true)
     setError(null)
     try {
-      const [ms, logs, ev, sa] = await Promise.all([
+      const [ms, logs, calendar, sa, gmail, brief] = await Promise.all([
         api(`/api/seniors/${seniorId}/medication-status/today`),
         api(`/api/seniors/${seniorId}/agent-logs`),
-        api(`/api/seniors/${seniorId}/calendar-events/upcoming`),
+        api('/api/calendar/upcoming?limit=8')
+          .then(events => ({ ok: true, events }))
+          .catch(error => ({ ok: false, error })),
         api(`/api/seniors/${seniorId}/scam-alerts`),
+        api('/api/gmail/recent?limit=5')
+          .then(messages => ({ ok: true, messages }))
+          .catch(error => ({ ok: false, error })),
+        api('/api/morning-brief/today').catch(() => null),
       ])
       setMedStatus(ms)
-      setAgentLogs(logs.slice(0, 6))
-      setEvents(ev)
+      setAgentLogs(logs.slice(0, 8))
       setScamAlerts(sa)
+      if (calendar.ok) {
+        setEvents(calendar.events)
+        setCalendarStatus('connected')
+      } else {
+        setEvents([])
+        setCalendarStatus('unavailable')
+      }
+      if (gmail.ok) {
+        setGmailMessages(gmail.messages)
+        setGmailStatus('connected')
+      } else {
+        setGmailMessages([])
+        setGmailStatus('unavailable')
+      }
+      setMorningBrief(brief?.brief ? brief : null)
     } catch (e) {
       setError(e.message)
     } finally {
@@ -102,6 +132,45 @@ export default function Overview() {
   const taken = medStatus?.filter(d => d.status === 'taken').length ?? 0
   const total = medStatus?.length ?? 0
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
+  const calendarConnected = calendarStatus === 'connected'
+  const gmailConnected = gmailStatus === 'connected'
+
+  const runIntegrationSync = async () => {
+    setSyncing(true)
+    try {
+      const [calendar, messages] = await Promise.all([
+        api('/api/calendar/upcoming?limit=8'),
+        api('/api/gmail/recent?limit=5'),
+      ])
+      setEvents(calendar)
+      setCalendarStatus('connected')
+      setGmailMessages(messages)
+      setGmailStatus('connected')
+      toast(`Refreshed ${calendar.length} calendar event${calendar.length === 1 ? '' : 's'} and ${messages.length} email${messages.length === 1 ? '' : 's'}.`)
+      await load()
+    } catch (e) {
+      toast(e.message, 'error')
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const runMorningBrief = async () => {
+    setBriefing(true)
+    try {
+      const res = await api('/api/morning-brief?force=true')
+      setMorningBrief(res)
+      const messages = await api('/api/gmail/recent?limit=5').catch(() => gmailMessages)
+      setGmailMessages(messages)
+      setGmailStatus('connected')
+      toast(`Morning brief generated from ${res.emailsCount ?? messages.length ?? 0} recent email${(res.emailsCount ?? messages.length) === 1 ? '' : 's'}.`)
+      await load()
+    } catch (e) {
+      toast(e.message, 'error')
+    } finally {
+      setBriefing(false)
+    }
+  }
 
   return (
     <>
@@ -134,16 +203,96 @@ export default function Overview() {
           <StatCard
             icon="📅" label="Upcoming Events"
             value={loading ? '—' : (events?.length ?? '—')}
-            sub={events?.[0]?.title ?? 'No upcoming events'}
+            sub={calendarConnected ? (events?.[0]?.title ?? 'Composio Calendar connected') : 'Composio Calendar unavailable'}
             accent="var(--info)"
           />
           <StatCard
             icon="🛡" label="Scam Alerts"
             value={loading ? '—' : (scamAlerts?.length ?? '—')}
-            sub={scamAlerts?.length ? `${scamAlerts[0].riskLevel} risk` : 'All clear'}
+            sub={gmailConnected ? (scamAlerts?.length ? `${scamAlerts[0].riskLevel} risk` : `${gmailMessages.length} recent emails`) : 'Composio Gmail unavailable'}
             accent={scamAlerts?.length ? 'var(--danger)' : 'var(--success)'}
           />
         </div>
+
+        <section className="glass-card ov-section integration-console">
+          <div className="ic-head">
+            <div>
+              <h3 className="section-heading">Google Integrations</h3>
+              <div className="ic-status-row">
+                <IntegrationChip icon="📅" label="Composio Calendar" connected={calendarConnected} />
+                <IntegrationChip icon="📧" label="Composio Gmail" connected={gmailConnected} />
+              </div>
+            </div>
+            <div className="ic-actions">
+              <button
+                className="glass-btn"
+                onClick={() => setPage('integrations')}
+              >
+                Manage
+              </button>
+              <button
+                className="glass-btn primary"
+                onClick={runIntegrationSync}
+                disabled={syncing || (!calendarConnected && !gmailConnected)}
+              >
+                {syncing ? 'Refreshing…' : 'Refresh Google'}
+              </button>
+            </div>
+          </div>
+
+          <div className="ic-grid">
+            <div className="ic-panel">
+              <div className="ic-panel-head">
+                <span>Calendar</span>
+                <span>{events?.length ?? 0} upcoming</span>
+              </div>
+              {!calendarConnected ? (
+                <Empty msg="Composio Calendar is not configured or connected." />
+              ) : !events?.length ? (
+                <Empty msg="No upcoming Google Calendar events." />
+              ) : (
+                <div className="mini-event-list">
+                  {events.slice(0, 3).map(ev => (
+                    <div key={ev.id} className="mini-event">
+                      <span className="mini-event-date">
+                        {new Date(eventStart(ev)).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                      </span>
+                      <span className="mini-event-title">{ev.title}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="ic-panel">
+              <div className="ic-panel-head">
+                <span>Email</span>
+                <span>{gmailConnected ? `${gmailMessages.length} recent` : 'Composio'}</span>
+              </div>
+              {!gmailConnected ? (
+                <Empty msg="Composio Gmail is not configured or connected." />
+              ) : morningBrief ? (
+                <p className="email-brief">{morningBrief.brief}</p>
+              ) : (
+                <div className="mini-email-list">
+                  {gmailMessages.slice(0, 3).map(message => (
+                    <div key={message.id || `${message.from}-${message.subject}`} className="mini-email">
+                      <span className="mini-email-from">{message.from}</span>
+                      <span className="mini-email-subject">{message.subject}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <button
+                className="glass-btn small"
+                onClick={runMorningBrief}
+                disabled={briefing || !gmailConnected}
+              >
+                {briefing ? 'Generating…' : morningBrief ? 'Refresh Brief' : 'Generate Brief'}
+              </button>
+            </div>
+          </div>
+        </section>
 
         <div className="ov-grid">
           <section className="glass-card ov-section">
@@ -206,7 +355,7 @@ export default function Overview() {
                   <div className="event-info">
                     <span className="event-title">{ev.title}</span>
                     <span className="event-date">
-                      {new Date(ev.date).toLocaleDateString('en-US', {
+                      {new Date(eventStart(ev)).toLocaleDateString('en-US', {
                         weekday: 'short', month: 'short', day: 'numeric',
                       })}
                     </span>
@@ -244,6 +393,92 @@ export default function Overview() {
           gap: 14px;
         }
         .ov-section { padding: 22px; }
+        .integration-console { margin-bottom: 16px; }
+        .ic-head {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 16px;
+          margin-bottom: 16px;
+        }
+        .ic-status-row { display: flex; flex-wrap: wrap; gap: 8px; }
+        .ic-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+        .ic-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .ic-panel {
+          min-width: 0;
+          padding: 14px;
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          background: rgba(255,255,255,0.44);
+        }
+        .ic-panel-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 10px;
+          font-size: 12px;
+          color: var(--text-secondary);
+        }
+        .ic-panel-head span:first-child {
+          color: var(--text-primary);
+          font-weight: 700;
+        }
+        .integration-chip {
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          min-height: 30px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: rgba(255,255,255,0.5);
+          font-size: 12px;
+          color: var(--text-secondary);
+          white-space: nowrap;
+        }
+        .integration-chip.is-connected {
+          border-color: rgba(46,213,115,0.28);
+          background: var(--success-dim);
+          color: var(--success);
+        }
+        .mini-event-list { display: flex; flex-direction: column; gap: 8px; }
+        .mini-event { display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .mini-event-date {
+          width: 48px;
+          flex-shrink: 0;
+          font-family: var(--font-mono);
+          font-size: 11px;
+          color: var(--info);
+        }
+        .mini-event-title {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 13px;
+          font-weight: 500;
+        }
+        .mini-email-list { display: flex; flex-direction: column; gap: 9px; margin-bottom: 12px; }
+        .mini-email { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        .mini-email-from,
+        .mini-email-subject {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .mini-email-from { font-size: 11.5px; color: var(--text-secondary); }
+        .mini-email-subject { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+        .email-brief {
+          min-height: 58px;
+          margin-bottom: 12px;
+          font-size: 13px;
+          line-height: 1.55;
+          color: var(--text-secondary);
+          white-space: pre-wrap;
+        }
+        .glass-btn.small { min-height: 32px; padding: 7px 11px; font-size: 12.5px; }
         .section-heading {
           font-size: 11px;
           font-weight: 700;
@@ -307,6 +542,8 @@ export default function Overview() {
         @media (max-width: 860px) {
           .stat-row { grid-template-columns: 1fr; }
           .ov-grid { grid-template-columns: 1fr; }
+          .ic-grid { grid-template-columns: 1fr; }
+          .ic-head { flex-direction: column; }
         }
       `}</style>
     </>
@@ -333,6 +570,16 @@ function StatCard({ icon, label, value, sub, accent }) {
         .sc-sub { font-size: 12.5px; color: var(--text-secondary); }
       `}</style>
     </>
+  )
+}
+
+function IntegrationChip({ icon, label, connected }) {
+  return (
+    <span className={`integration-chip${connected ? ' is-connected' : ''}`}>
+      <span>{icon}</span>
+      <span>{label}</span>
+      <span>{connected ? 'Connected' : 'Off'}</span>
+    </span>
   )
 }
 

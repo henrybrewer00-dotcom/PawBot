@@ -15,6 +15,7 @@ import {
   getAccountProfile,
   getMedicationsForSenior,
   getScamAlertsForSenior,
+  getSeniorPersonalInfo,
   getTodayMedicationStatus,
   getUpcomingCalendarEvents,
   handleIncomingTextReply,
@@ -23,6 +24,7 @@ import {
   runMedicationAgentTick,
   sendMedicationReminder,
   upsertSeniorForLink,
+  upsertSeniorPersonalInfo,
   upsertAccountProfile,
   updateMedication
 } from "./domain.js";
@@ -210,6 +212,19 @@ export function createRouter(store) {
     }
     const results = await searchSeniorMemory(req.params.seniorId, query);
     res.json({ query, results });
+  }));
+
+  router.get("/api/seniors/:seniorId/personal-info", asyncHandler(async (req, res) => {
+    res.json({ personalInfo: await getSeniorPersonalInfo(store, req.params.seniorId) });
+  }));
+
+  router.put("/api/seniors/:seniorId/personal-info", asyncHandler(async (req, res) => {
+    res.json({ personalInfo: await upsertSeniorPersonalInfo(store, req.params.seniorId, req.body) });
+  }));
+
+  router.get("/api/agents/seniors/:seniorId/personal-info", asyncHandler(async (req, res) => {
+    requireAgentAuth(req);
+    res.json({ personalInfo: await getSeniorPersonalInfo(store, req.params.seniorId, { includePassword: true }) });
   }));
 
   router.post("/api/seniors/:seniorId/hyperspell/connect", asyncHandler(async (req, res) => {
