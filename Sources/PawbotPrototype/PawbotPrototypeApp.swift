@@ -56,6 +56,7 @@ final class PawbotModel: ObservableObject {
 
     let actions = [
         PawbotAction(title: "Explain my screen", subtitle: "See and explain it plainly", icon: "eye.fill", color: .orange),
+        PawbotAction(title: "My Messages", subtitle: "Read or reply to a text", icon: "message.fill", color: .pink),
         PawbotAction(title: "Make bigger", subtitle: "Increase screen text", icon: "textformat.size", color: .green),
         PawbotAction(title: "Help me reply", subtitle: "Draft a friendly answer", icon: "bubble.left.and.bubble.right.fill", color: .indigo)
     ]
@@ -216,9 +217,32 @@ final class PawbotModel: ObservableObject {
         }
         switch action.title {
         case "Explain my screen": lookAtScreen()
+        case "My Messages": openMessages()
         case "Make bigger": cycleFontSize()
         case "Help me reply": startReplyHelper()
         default: break
+        }
+    }
+
+    func openMessages() {
+        appendBot("Opening Messages now — give it a second to come up.")
+        let bundleID = "com.apple.MobileSMS"
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            appendBot("I couldn't find the Messages app on this Mac. You may need to open it from your Applications folder once.")
+            return
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: appURL, configuration: config) { [weak self] _, error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let error {
+                    self.appendBot("I couldn't open Messages — \(error.localizedDescription)")
+                    return
+                }
+                try? await Task.sleep(for: .seconds(1))
+                self.lookAtScreen(prompt: "What does the message at the top of Messages say? Read it out so I can hear it clearly, then tell me who sent it.")
+            }
         }
     }
 
@@ -291,8 +315,10 @@ final class PawbotModel: ObservableObject {
                 let elapsed = (tick + 1) * intervalSeconds
                 if elapsed == 15 {
                     self.appendBot("Still waiting for macOS to flip the switch — I'll keep checking every few seconds.")
-                } else if elapsed == 45 {
-                    self.appendBot("If it's not catching, try fully quitting Pawbot (⌘Q) and reopening. Unsigned apps sometimes need a relaunch for macOS to register the permission.")
+                } else if elapsed == 30 {
+                    self.appendBot("If macOS isn't catching it: open Privacy & Security → Screen Recording, click the minus button next to every Pawbot entry to remove them, then click the plus button and add Pawbot fresh. That usually fixes it.")
+                } else if elapsed == 60 {
+                    self.appendBot("Last resort: fully quit Pawbot (⌘Q) and reopen. Unsigned apps sometimes need a relaunch before macOS will trust them.")
                 }
             }
             self?.isPawbotThinking = false
@@ -321,7 +347,7 @@ final class PawbotModel: ObservableObject {
 
         if !isPawbotThinking { isPawbotThinking = true }
 
-        let basePrompt = "I'm helping an older adult use their computer. In 2-3 short, friendly sentences, plainly describe what's on their screen and what they might want help with. No jargon."
+        let basePrompt = "I'm helping an older adult use their computer. You're looking at their currently active window (whatever app they're focused on). In 2-3 short, friendly sentences, plainly describe what's in that window and what they might want help with. No jargon."
         let prompt: String
         if let customPrompt, !customPrompt.isEmpty {
             prompt = "\(basePrompt)\n\nThey just asked: \"\(customPrompt)\". Answer that specifically based on what's on the screen."
@@ -1336,8 +1362,43 @@ enum PawbotScreenCaptureResult {
 }
 
 enum PawbotScreenCapture {
+    @MainActor private static var lastRequestedAt: Date?
+
     @MainActor
-    static func tryCapture() -> NSImage? {
+    static func tryCaptureActiveWindow() -> NSImage? {
+        let options: CGWindowListOption = [.optionOnScreenOnly]
+        guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let frontmost = raw.first { dict in
+            let layer = dict[kCGWindowLayer as String] as? Int ?? -1
+            guard layer == 0 else { return false }
+            let pid = dict[kCGWindowOwnerPID as String] as? Int32 ?? 0
+            guard pid != myPID else { return false }
+            let alpha = dict[kCGWindowAlpha as String] as? Double ?? 0
+            guard alpha > 0.1 else { return false }
+            guard let bounds = dict[kCGWindowBounds as String] as? [String: Any],
+                  let w = bounds["Width"] as? Double, w > 200,
+                  let h = bounds["Height"] as? Double, h > 200 else { return false }
+            return true
+        }
+        guard let frontmost,
+              let windowID = frontmost[kCGWindowNumber as String] as? CGWindowID else {
+            return nil
+        }
+        guard let cgImage = CGWindowListCreateImage(
+            .null,
+            .optionIncludingWindow,
+            windowID,
+            [.bestResolution, .boundsIgnoreFraming]
+        ) else { return nil }
+        let size = NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
+        return NSImage(cgImage: cgImage, size: size)
+    }
+
+    @MainActor
+    static func tryCaptureFullScreen() -> NSImage? {
         guard let displayID = NSScreen.main?.displayID else { return nil }
         guard let cgImage = CGDisplayCreateImage(displayID) else { return nil }
         let size = NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
@@ -1345,14 +1406,23 @@ enum PawbotScreenCapture {
     }
 
     @MainActor
+    static func tryCapture() -> NSImage? {
+        tryCaptureActiveWindow() ?? tryCaptureFullScreen()
+    }
+
+    @MainActor
     static func captureWithPermission() async -> PawbotScreenCaptureResult {
         if let image = tryCapture() {
             return .image(image)
         }
-        CGRequestScreenCaptureAccess()
-        try? await Task.sleep(for: .milliseconds(500))
-        if let image = tryCapture() {
-            return .image(image)
+        let now = Date()
+        if lastRequestedAt == nil || now.timeIntervalSince(lastRequestedAt ?? .distantPast) > 60 {
+            CGRequestScreenCaptureAccess()
+            lastRequestedAt = now
+            try? await Task.sleep(for: .milliseconds(500))
+            if let image = tryCapture() {
+                return .image(image)
+            }
         }
         return .denied
     }
