@@ -3,6 +3,7 @@ import { HttpError } from "./http.js";
 import { writeAgentLog } from "./agentLog.js";
 import { sendText } from "./sendblue.js";
 import { config } from "./config.js";
+import { normalizeEmail, normalizeLookupIdentifier, normalizePhone } from "./identity.js";
 import { saveEpisodicMemory, saveFactMemory, searchSeniorMemory } from "./nia.js";
 import { minutesBetween, scheduledIsoForLocalTime, toDateKey, toLocalTime } from "./time.js";
 
@@ -56,9 +57,23 @@ export async function upsertAccountProfile(store, authUser, body) {
     throw new HttpError(400, "role must be senior or caretaker");
   }
 
-  const existing = await store.find("users", (user) => user.authUserId === authUser.id);
   const email = authUser.email ?? body.email;
   if (!email) throw new HttpError(400, "Authenticated user is missing an email address");
+
+  // Primary lookup: auth user already linked to a profile
+  let existing = await store.find("users", (user) => user.authUserId === authUser.id);
+
+  // Fallback: caretaker pre-created a profile for this email (authUserId is null)
+  // Link the auth account to that existing profile instead of creating a duplicate
+  if (!existing) {
+    const preCreated = await store.find(
+      "users",
+      (user) => user.email === email && user.authUserId === null
+    );
+    if (preCreated) {
+      existing = await store.update("users", preCreated.id, { authUserId: authUser.id });
+    }
+  }
 
   if (existing) {
     const updated = await store.update("users", existing.id, {
@@ -81,17 +96,67 @@ export async function upsertAccountProfile(store, authUser, body) {
   return getAccountProfile(store, authUser);
 }
 
-export async function linkCaretakerToSenior(store, { caretakerId, seniorId, permissionLevel = "manager" }) {
+export async function linkCaretakerToSenior(
+  store,
+  { caretakerId, seniorId, permissionLevel = "manager" },
+  { strictSeniorLookup = true } = {}
+) {
   const caretaker = await store.find("users", (user) => user.id === caretakerId && user.role === "caretaker");
-  const senior = await store.find("users", (user) => user.id === seniorId && user.role === "senior");
   if (!caretaker) throw new HttpError(404, "Caretaker not found");
-  if (!senior) throw new HttpError(404, "Senior not found");
 
-  return store.insert("careRelationships", {
-    id: createId("rel"),
-    caretakerId,
-    seniorId,
-    permissionLevel
+  const visibleSenior = await store.find("users", (user) => user.id === seniorId);
+  if (visibleSenior && visibleSenior.role !== "senior") {
+    throw new HttpError(400, `That account has role '${visibleSenior.role}', not 'senior'`);
+  }
+  if (strictSeniorLookup && !visibleSenior) {
+    throw new HttpError(404, "Senior not found");
+  }
+
+  try {
+    return await store.insert("careRelationships", {
+      id: createId("rel"),
+      caretakerId,
+      seniorId,
+      permissionLevel
+    });
+  } catch (error) {
+    const message = String(error?.message ?? error);
+    if (/foreign key|violates/i.test(message)) {
+      throw new HttpError(404, `Senior not found for ID: ${seniorId}`);
+    }
+    throw error;
+  }
+}
+
+export async function upsertSeniorForLink(store, identifier, timezone = "America/Los_Angeles") {
+  const needle = normalizeLookupIdentifier(identifier);
+  if (!needle) throw new HttpError(400, "Senior identifier is required");
+
+  const users = await store.all("users");
+  const existing = users.find((user) =>
+    user.role === "senior" &&
+    [user.id, user.authUserId, normalizeEmail(user.email), normalizePhone(user.phone)].some((field) =>
+      normalizeLookupIdentifier(field) === needle
+    )
+  );
+  if (existing) return existing;
+
+  const email = needle.includes("@")
+    ? needle
+    : `linked-${needle.replace(/[^\d]/g, "") || Date.now()}@pawbot.local`;
+  const phone = needle.startsWith("+") || /^\d[\d\s().-]*$/.test(needle)
+    ? needle
+    : "+10000000000";
+  const name = needle.includes("@")
+    ? needle.split("@")[0].replace(/[._-]+/g, " ").trim() || "Linked Senior"
+    : "Linked Senior";
+
+  return createUser(store, {
+    name,
+    phone,
+    email,
+    role: "senior",
+    timezone
   });
 }
 

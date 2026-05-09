@@ -4,7 +4,9 @@ import Topbar from './components/Topbar.jsx'
 import Toast from './components/Toast.jsx'
 import SetupModal from './components/SetupModal.jsx'
 import AccountSetup from './components/AccountSetup.jsx'
+import Landing from './pages/Landing.jsx'
 import Login from './pages/Login.jsx'
+import CaretakerHome from './pages/CaretakerHome.jsx'
 import Overview from './pages/Overview.jsx'
 import Medications from './pages/Medications.jsx'
 import Integrations from './pages/Integrations.jsx'
@@ -24,6 +26,8 @@ const PAGES = {
 
 export default function App() {
   const [page, setPage] = useState('overview')
+  const [landingRole, setLandingRole] = useState(null) // null = show landing, string = show login with role
+  const [showLanding, setShowLanding] = useState(true)
   const [seniorId, setSeniorId] = useState(() => localStorage.getItem('pawbot_senior_id') || '')
   const [showSetup, setShowSetup] = useState(!localStorage.getItem('pawbot_senior_id'))
   const [toasts, setToasts] = useState([])
@@ -53,8 +57,10 @@ export default function App() {
       setSeniorId(nextProfile.account.id)
       setShowSetup(false)
     } else if (nextProfile?.account?.role === 'caretaker') {
-      const stored = localStorage.getItem('pawbot_senior_id')
-      if (!stored) setShowSetup(true)
+      localStorage.removeItem('pawbot_senior_id')
+      setSeniorId('')
+      setShowSetup(false)
+      setPage('overview')
     }
   }, [])
 
@@ -98,6 +104,8 @@ export default function App() {
     setUser(null)
     setProfile(null)
     setSeniorId('')
+    setShowLanding(true)
+    setLandingRole(null)
     localStorage.removeItem('pawbot_senior_id')
   }
 
@@ -115,7 +123,21 @@ export default function App() {
   }
 
   if (!user) {
-    return <Login onLogin={handleLogin} />
+    if (showLanding) {
+      return (
+        <Landing
+          onSelectRole={(role) => { setLandingRole(role); setShowLanding(false) }}
+          onSignIn={() => { setLandingRole(null); setShowLanding(false) }}
+        />
+      )
+    }
+    return (
+      <Login
+        onLogin={handleLogin}
+        defaultRole={landingRole}
+        onBack={() => { setShowLanding(true); setLandingRole(null) }}
+      />
+    )
   }
 
   if (profileLoading) {
@@ -130,7 +152,8 @@ export default function App() {
     return <AccountSetup user={user} onComplete={applyProfile} />
   }
 
-  const PageComponent = PAGES[page]
+  const isCaretaker = profile.account.role === 'caretaker'
+  const PageComponent = isCaretaker ? CaretakerHome : (PAGES[page] ?? Overview)
 
   return (
     <AppContext.Provider value={{ seniorId, toast, setPage, user, profile, account: profile.account }}>
@@ -145,7 +168,7 @@ export default function App() {
           <Topbar
             seniorId={seniorId}
             account={profile.account}
-            onOpenSetup={() => setShowSetup(true)}
+            onOpenSetup={profile.account.role === 'senior' ? () => setShowSetup(true) : null}
           />
           <main style={{
             flex: 1,
@@ -157,7 +180,7 @@ export default function App() {
         </div>
       </div>
       <Toast toasts={toasts} />
-      {showSetup && (
+      {showSetup && profile.account.role === 'senior' && (
         <SetupModal
           initialId={seniorId}
           accountRole={profile.account.role}

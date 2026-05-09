@@ -1,6 +1,7 @@
 import express from "express";
 import { requireInsForgeUser } from "./auth.js";
 import { asyncHandler, HttpError, requireFields } from "./http.js";
+import { normalizeLookupIdentifier } from "./identity.js";
 import { config } from "./config.js";
 import { runCalendarReminderAgent } from "./calendarReminder.js";
 import { runDailySummaryAgent } from "./dailySummary.js";
@@ -21,6 +22,7 @@ import {
   markMedicationTaken,
   runMedicationAgentTick,
   sendMedicationReminder,
+  upsertSeniorForLink,
   upsertAccountProfile,
   updateMedication
 } from "./domain.js";
@@ -71,6 +73,34 @@ export function createRouter(store) {
     const authUser = await requireInsForgeUser(req);
     requireFields(req.body, ["role", "name", "phone"]);
     res.status(201).json({ profile: await upsertAccountProfile(store, authUser, req.body) });
+  }));
+
+  router.post("/api/me/link-senior", asyncHandler(async (req, res) => {
+    const authUser = await requireInsForgeUser(req);
+    const profile = await getAccountProfile(store, authUser);
+    if (!profile?.account) throw new HttpError(404, "Account profile not found");
+    if (profile.account.role !== "caretaker") {
+      throw new HttpError(403, "Only caretaker accounts can link seniors");
+    }
+
+    const needle = normalizeLookupIdentifier(req.body?.identifier ?? req.body?.seniorId ?? req.body?.email ?? req.body?.phone ?? "");
+    if (!needle) {
+      throw new HttpError(400, "identifier, seniorId, email, or phone is required");
+    }
+
+    const senior = await upsertSeniorForLink(store, needle, profile.account.timezone);
+
+    const already = (await store.all("careRelationships")).find(
+      (r) => r.caretakerId === profile.account.id && r.seniorId === senior.id
+    );
+    if (already) throw new HttpError(409, "This senior is already linked to your account");
+
+    await linkCaretakerToSenior(store, { caretakerId: profile.account.id, seniorId: senior.id });
+
+    res.status(201).json({
+      senior,
+      profile: await getAccountProfile(store, authUser)
+    });
   }));
 
   router.post("/api/me/seniors", asyncHandler(async (req, res) => {

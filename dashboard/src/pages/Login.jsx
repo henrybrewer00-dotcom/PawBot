@@ -2,13 +2,13 @@ import { useState } from 'react'
 import { api } from '../api.js'
 import { insforge } from '../insforge.js'
 
-export default function Login({ onLogin }) {
+export default function Login({ onLogin, defaultRole, onBack }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
   const [phone, setPhone] = useState('')
-  const [role, setRole] = useState('caretaker')
-  const [mode, setMode] = useState('signin') // 'signin' | 'signup'
+  const [role, setRole] = useState(defaultRole || 'caretaker')
+  const [mode, setMode] = useState(defaultRole ? 'signup' : 'signin')
   const [verificationCode, setVerificationCode] = useState('')
   const [pendingSignup, setPendingSignup] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -102,6 +102,19 @@ export default function Login({ onLogin }) {
       background: 'var(--bg-primary)',
     }}>
       <div className="glass-card" style={{ width: '100%', maxWidth: 400, padding: 40 }}>
+        {onBack && (
+          <button
+            onClick={onBack}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              background: 'none', border: 'none',
+              color: 'var(--text-secondary)', cursor: 'pointer',
+              fontSize: 13, marginBottom: 20, padding: 0,
+            }}
+          >
+            ← Back
+          </button>
+        )}
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <div style={{ fontSize: 38, marginBottom: 10 }}>🐾</div>
           <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 6 }}>PawBot</h1>
@@ -130,7 +143,7 @@ export default function Login({ onLogin }) {
                   padding: '10px 14px',
                   borderRadius: 10,
                   border: '1px solid var(--border)',
-                  background: 'rgba(255,255,255,0.05)',
+                  background: '#ffffff',
                   color: 'var(--text-primary)',
                   fontSize: 18,
                   letterSpacing: '0.18em',
@@ -169,7 +182,7 @@ export default function Login({ onLogin }) {
                     padding: '10px 14px',
                     borderRadius: 10,
                     border: '1px solid var(--border)',
-                    background: 'rgba(255,255,255,0.05)',
+                    background: '#ffffff',
                     color: 'var(--text-primary)',
                     fontSize: 14,
                     outline: 'none',
@@ -191,7 +204,7 @@ export default function Login({ onLogin }) {
                     padding: '10px 14px',
                     borderRadius: 10,
                     border: '1px solid var(--border)',
-                    background: 'rgba(255,255,255,0.05)',
+                    background: '#ffffff',
                     color: 'var(--text-primary)',
                     fontSize: 14,
                     outline: 'none',
@@ -217,7 +230,7 @@ export default function Login({ onLogin }) {
                     padding: '10px 14px',
                     borderRadius: 10,
                     border: '1px solid var(--border)',
-                    background: 'rgba(255,255,255,0.05)',
+                    background: '#ffffff',
                     color: 'var(--text-primary)',
                     fontSize: 14,
                     outline: 'none',
@@ -239,7 +252,7 @@ export default function Login({ onLogin }) {
                     padding: '10px 14px',
                     borderRadius: 10,
                     border: '1px solid var(--border)',
-                    background: 'rgba(255,255,255,0.05)',
+                    background: '#ffffff',
                     color: 'var(--text-primary)',
                     fontSize: 14,
                     outline: 'none',
@@ -329,7 +342,7 @@ export default function Login({ onLogin }) {
           grid-template-columns: 1fr 1fr;
           gap: 6px;
           padding: 4px;
-          background: rgba(255,255,255,0.04);
+          background: rgba(0,0,0,0.04);
           border: 1px solid var(--border);
           border-radius: 8px;
         }

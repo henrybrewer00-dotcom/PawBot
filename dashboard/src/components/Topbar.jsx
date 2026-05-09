@@ -3,6 +3,8 @@ export default function Topbar({ seniorId, account, onOpenSetup }) {
     ? (seniorId.length > 22 ? seniorId.slice(0, 22) + '…' : seniorId)
     : 'Not configured'
   const roleLabel = account?.role === 'senior' ? 'Senior Portal' : 'Caretaker Portal'
+  const showSeniorChip = account?.role === 'senior' && seniorId
+  const showGear = account?.role === 'senior' && onOpenSetup
 
   return (
     <>
@@ -20,14 +22,14 @@ export default function Topbar({ seniorId, account, onOpenSetup }) {
               <span className="chip-id" title={account.email}>{account.name}</span>
             </div>
           )}
-          {seniorId && (
+          {showSeniorChip && (
             <div className="senior-chip">
               <span className="chip-pulse" />
               <span className="chip-label">Senior</span>
               <span className="chip-id" title={seniorId}>{short}</span>
             </div>
           )}
-          {onOpenSetup && (
+          {showGear && (
             <button className="tb-gear" onClick={onOpenSetup} title="Settings">
               ⚙
             </button>
@@ -42,7 +44,7 @@ export default function Topbar({ seniorId, account, onOpenSetup }) {
           justify-content: space-between;
           padding: 0 28px;
           border-bottom: 1px solid var(--border);
-          background: rgba(10, 14, 26, 0.7);
+          background: rgba(255, 255, 255, 0.88);
           backdrop-filter: blur(12px);
           -webkit-backdrop-filter: blur(12px);
           flex-shrink: 0;
@@ -130,7 +132,7 @@ export default function Topbar({ seniorId, account, onOpenSetup }) {
         .tb-gear:hover {
           background: var(--bg-surface-hover);
           color: var(--text-primary);
-          border-color: rgba(255, 255, 255, 0.14);
+          border-color: rgba(0, 0, 0, 0.14);
           transform: rotate(30deg);
         }
       `}</style>

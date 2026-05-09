@@ -1,11 +1,17 @@
+import { useApp } from '../App.jsx'
+
 const NAV_ITEMS = [
-  { id: 'overview',      icon: '⌂',  label: 'Overview' },
-  { id: 'medications',   icon: '💊', label: 'Medications' },
-  { id: 'integrations',  icon: '🔗', label: 'Integrations' },
-  { id: 'alerts',        icon: '🛡', label: 'Alerts & Memory' },
+  { id: 'overview',     icon: '⌂',  label: 'Overview' },
+  { id: 'medications',  icon: '💊', label: 'Medications', seniorOnly: true },
+  { id: 'integrations', icon: '🔗', label: 'Integrations' },
+  { id: 'alerts',       icon: '🛡', label: 'Alerts & Memory' },
 ]
 
 export default function Sidebar({ currentPage, onNavigate, onLogout }) {
+  const { account } = useApp()
+  const navItems = account?.role === 'caretaker'
+    ? NAV_ITEMS.filter(item => item.id === 'overview')
+    : NAV_ITEMS.filter(item => !item.seniorOnly || account?.role === 'senior')
   return (
     <>
       <aside className="sidebar">
@@ -14,7 +20,7 @@ export default function Sidebar({ currentPage, onNavigate, onLogout }) {
           <span className="logo-text">PawBot</span>
         </div>
         <nav className="sidebar-nav">
-          {NAV_ITEMS.map(item => (
+          {navItems.map(item => (
             <button
               key={item.id}
               className={`nav-item${currentPage === item.id ? ' active' : ''}`}
@@ -40,7 +46,7 @@ export default function Sidebar({ currentPage, onNavigate, onLogout }) {
           display: flex;
           flex-direction: column;
           padding: 16px 0 24px;
-          background: rgba(255, 255, 255, 0.02);
+          background: rgba(255, 255, 255, 0.80);
           border-right: 1px solid var(--border);
           transition: width var(--transition-slow);
           overflow: hidden;
@@ -120,7 +126,7 @@ export default function Sidebar({ currentPage, onNavigate, onLogout }) {
           transition: height var(--transition-base);
         }
         .nav-item:hover {
-          background: rgba(255, 255, 255, 0.05);
+          background: rgba(0, 0, 0, 0.04);
           color: var(--text-primary);
         }
         .nav-item.active {

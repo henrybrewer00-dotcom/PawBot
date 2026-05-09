@@ -6,8 +6,14 @@ import {
   getTodayMedicationStatus,
   handleIncomingTextReply,
   linkCaretakerToSenior,
-  runMedicationAgentTick
+  runMedicationAgentTick,
+  upsertSeniorForLink
 } from "../src/domain.js";
+import {
+  normalizeEmail,
+  normalizeLookupIdentifier,
+  normalizePhone
+} from "../src/identity.js";
 
 const emptyState = () => ({
   users: [],
@@ -104,4 +110,64 @@ test("medication reminder can be sent and confirmed by inbound text", async () =
 
   assert.equal(reply.matched, true);
   assert.equal(takenStatus[0].status, "taken");
+});
+
+test("caretaker can link a senior by ID even when the senior lookup is indirect", async () => {
+  const store = new MemoryStore();
+  const caretaker = await createUser(store, {
+    name: "Demo Caretaker",
+    phone: "+15550000002",
+    email: "caretaker@example.com",
+    role: "caretaker"
+  });
+  const senior = await createUser(store, {
+    name: "Demo Senior",
+    phone: "+15550000001",
+    email: "senior@example.com",
+    role: "senior"
+  });
+
+  const lookupStore = {
+    async find(collection, predicate) {
+      if (collection !== "users") return store.find(collection, predicate);
+      const rows = await store.all(collection);
+      return rows.find((row) => row.id === caretaker.id && predicate(row)) ?? null;
+    },
+    all(collection) {
+      return store.all(collection);
+    },
+    insert(collection, item) {
+      return store.insert(collection, item);
+    },
+    update(collection, id, changes) {
+      return store.update(collection, id, changes);
+    }
+  };
+
+  const rel = await linkCaretakerToSenior(
+    lookupStore,
+    { caretakerId: caretaker.id, seniorId: senior.id },
+    { strictSeniorLookup: false }
+  );
+
+  assert.equal(rel.caretakerId, caretaker.id);
+  assert.equal(rel.seniorId, senior.id);
+  assert.equal(store.state.careRelationships.length, 1);
+});
+
+test("identity normalization matches email and phone variants", async () => {
+  assert.equal(normalizeEmail("Senior@Example.COM "), "senior@example.com");
+  assert.equal(normalizePhone("(555) 000-0001"), "5550000001");
+  assert.equal(normalizeLookupIdentifier(" SENIOR@Example.com "), "senior@example.com");
+  assert.equal(normalizeLookupIdentifier(" +1 (555) 000-0001 "), "+15550000001");
+});
+
+test("upsertSeniorForLink creates a senior when the email is not already in users", async () => {
+  const store = new MemoryStore();
+  const senior = await upsertSeniorForLink(store, "brewert1@uci.edu", "America/Los_Angeles");
+
+  assert.equal(senior.role, "senior");
+  assert.equal(senior.email, "brewert1@uci.edu");
+  assert.equal(store.state.users.length, 1);
+  assert.equal(store.state.users[0].email, "brewert1@uci.edu");
 });
