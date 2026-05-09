@@ -188,16 +188,10 @@ final class PawbotModel: ObservableObject {
             return
         }
 
-        if Self.looksLikeScreenshotRequest(trimmed) {
-            lookAtScreen(prompt: trimmed)
-            return
-        }
-
         Task { @MainActor in
-            let context = await Self.gatherEphemeralContext(for: trimmed)
             let reply: String
             do {
-                reply = try await PawbotAI.shared.reply(to: trimmed, ephemeralContext: context)
+                reply = try await PawbotAI.shared.reply(to: trimmed)
             } catch {
                 let detail = (error as? LocalizedError)?.errorDescription ?? "\(error)"
                 NSLog("[Pawbot] AI error: %@", detail)
@@ -208,65 +202,6 @@ final class PawbotModel: ObservableObject {
                 messages.append(PawbotMessage(text: reply, isUser: false))
             }
         }
-    }
-
-    private static func gatherEphemeralContext(for text: String) async -> String? {
-        var blocks: [String] = []
-        if looksLikeCalendarRequest(text) {
-            if let events = try? await PawbotBackend.shared.upcomingEvents(limit: 10), !events.isEmpty {
-                let lines = events.prefix(10).map { e -> String in
-                    let when = e.start ?? "Time unknown"
-                    let where_ = e.location.flatMap { $0.isEmpty ? nil : " at \($0)" } ?? ""
-                    return "- \(e.title) (\(when))\(where_)"
-                }.joined(separator: "\n")
-                blocks.append("Upcoming calendar events from the user's Google Calendar:\n\(lines)")
-            }
-        }
-        if looksLikeEmailRequest(text) {
-            if let emails = try? await PawbotBackend.shared.recentGmail(limit: 8), !emails.isEmpty {
-                let lines = emails.prefix(8).map { e in
-                    "- From \(e.from): \(e.subject)\n  Preview: \(e.snippet.prefix(180))"
-                }.joined(separator: "\n")
-                blocks.append("Recent emails from the user's Gmail:\n\(lines)")
-            }
-        }
-        if looksLikeTextRequest(text) {
-            if let texts = try? await PawbotMessagesAPI.shared.recentMessages(limit: 8), !texts.isEmpty {
-                let lines = texts.map { m in
-                    "- \(m.prettySender) (\(m.relativeTime)): \(m.text)"
-                }.joined(separator: "\n")
-                blocks.append("Recent iMessages from the user's Messages app:\n\(lines)")
-            }
-        }
-        return blocks.isEmpty ? nil : blocks.joined(separator: "\n\n")
-    }
-
-    private static func looksLikeCalendarRequest(_ text: String) -> Bool {
-        let t = text.lowercased()
-        let phrases = ["calendar", "event", "events", "upcoming", "appointment", "appointments", "meeting", "meetings", "schedule", "what do i have", "what's on my", "whats on my", "today's plans", "todays plans", "next event", "what's next", "whats next"]
-        return phrases.contains { t.contains($0) }
-    }
-
-    private static func looksLikeEmailRequest(_ text: String) -> Bool {
-        let t = text.lowercased()
-        let phrases = ["email", "emails", "inbox", "mail", "gmail", "from gmail", "any mail"]
-        return phrases.contains { t.contains($0) }
-    }
-
-    private static func looksLikeTextRequest(_ text: String) -> Bool {
-        let t = text.lowercased()
-        let phrases = ["text from", "text said", "imessage", "messages app", "any new text", "any texts", "recent text", "latest text", "did i get a text"]
-        return phrases.contains { t.contains($0) }
-    }
-
-    private static func looksLikeScreenshotRequest(_ text: String) -> Bool {
-        let t = text.lowercased()
-        let phrases = [
-            "screen", "screenshot", "what do you see", "look at my", "look at this",
-            "what's on my", "whats on my", "what is on my", "read my screen",
-            "read this", "see my", "see what", "see this", "show me what", "tell me what's"
-        ]
-        return phrases.contains { t.contains($0) }
     }
 
 
@@ -1359,10 +1294,96 @@ actor PawbotAI {
     private let systemPrompt = """
     You are Pawbot, a calm and patient assistant designed to help older adults \
     with what's on their computer screen. Speak gently. Use short sentences and \
-    plain words. Offer one step at a time. Never use jargon. If asked to read \
-    aloud, explain, enlarge text, or help reply to a message, walk them through \
-    it kindly. Keep responses under 3 sentences unless they ask for more.
+    plain words. Offer one step at a time. Never use jargon. Keep responses under \
+    3 sentences unless they ask for more.
+
+    You have tools. Use them whenever the user is asking about something only \
+    the tools can answer. Don't apologize that you can't see something — call \
+    the relevant tool first, then answer with the result. Examples:
+    - "what's on my calendar / events / appointments / next meeting" → get_upcoming_calendar_events
+    - "any new emails / inbox / something from X" → get_recent_emails
+    - "any new texts / what did Sarah text / iMessage from mom" → get_recent_imessages
+    - "what's on my screen / what app is this / explain this page / read this" → look_at_screen
+    - "what's my morning brief / give me a recap" → get_morning_brief
+
+    Call multiple tools in parallel if more than one is relevant. After tool \
+    results come back, answer in plain words.
     """
+
+    private let toolDefinitions: [[String: Any]] = [
+        [
+            "type": "function",
+            "function": [
+                "name": "get_upcoming_calendar_events",
+                "description": "Get the user's upcoming Google Calendar events. Use whenever they ask about their calendar, schedule, appointments, meetings, or what's coming up.",
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "limit": [
+                            "type": "integer",
+                            "description": "Maximum events to return (default 8)"
+                        ]
+                    ]
+                ]
+            ]
+        ],
+        [
+            "type": "function",
+            "function": [
+                "name": "get_recent_emails",
+                "description": "Get the user's recent Gmail messages. Use whenever they ask about email, inbox, mail, or messages from a specific sender by email.",
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "limit": [
+                            "type": "integer",
+                            "description": "Maximum emails to return (default 5)"
+                        ]
+                    ]
+                ]
+            ]
+        ],
+        [
+            "type": "function",
+            "function": [
+                "name": "get_recent_imessages",
+                "description": "Get the user's recent iMessage / SMS conversations from the Mac Messages app. Use whenever they ask about texts, what someone texted, or SMS.",
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "limit": [
+                            "type": "integer",
+                            "description": "Maximum texts to return (default 8)"
+                        ]
+                    ]
+                ]
+            ]
+        ],
+        [
+            "type": "function",
+            "function": [
+                "name": "look_at_screen",
+                "description": "Take a screenshot of the user's full screen and describe what you see. Use whenever they ask about what's currently on their screen, what app they have open, what a webpage says, or to read something they're looking at.",
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "focus": [
+                            "type": "string",
+                            "description": "Optional specific question about the screen (e.g., 'what does this email say?')"
+                        ]
+                    ]
+                ]
+            ]
+        ],
+        [
+            "type": "function",
+            "function": [
+                "name": "get_morning_brief",
+                "description": "Get today's pre-generated morning briefing (calendar + emails + warm greeting). Use when the user asks for their morning brief or daily recap.",
+                "parameters": [ "type": "object", "properties": [:] ]
+            ]
+        ]
+    ]
 
     private var history: [[String: String]] = []
 
@@ -1392,40 +1413,106 @@ actor PawbotAI {
         guard let apiKey else { throw PawbotAIError.missingKey }
 
         history.append(["role": "user", "content": userText])
-        var messages: [[String: String]] = [["role": "system", "content": systemPrompt]]
+        var workingMessages: [[String: Any]] = [["role": "system", "content": systemPrompt]]
         if let ephemeralContext, !ephemeralContext.isEmpty {
-            messages.append(["role": "system", "content": "Live data the user just asked about (use this to answer specifically — don't say you can't see it):\n\n\(ephemeralContext)"])
+            workingMessages.append(["role": "system", "content": "Extra context: \(ephemeralContext)"])
         }
-        messages.append(contentsOf: history.suffix(20))
+        for h in history.suffix(20) {
+            workingMessages.append(["role": h["role"] ?? "user", "content": h["content"] ?? ""])
+        }
 
+        for _ in 0..<5 {
+            let response: ChatResponse
+            do {
+                response = try await postChatWithTools(apiKey: apiKey, messages: workingMessages, tools: toolDefinitions, temperature: 0.5)
+            } catch {
+                if history.last?["role"] == "user" { history.removeLast() }
+                throw error
+            }
+
+            if !response.toolCalls.isEmpty {
+                var assistantMsg: [String: Any] = ["role": "assistant", "content": ""]
+                assistantMsg["tool_calls"] = response.toolCalls.map { tc -> [String: Any] in
+                    [
+                        "id": tc.id,
+                        "type": "function",
+                        "function": ["name": tc.name, "arguments": tc.argumentsJSON]
+                    ]
+                }
+                workingMessages.append(assistantMsg)
+
+                for call in response.toolCalls {
+                    let result = await PawbotToolExecutor.shared.execute(name: call.name, argumentsJSON: call.argumentsJSON)
+                    workingMessages.append([
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": result
+                    ])
+                }
+                continue
+            }
+
+            let content = response.content?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !content.isEmpty {
+                history.append(["role": "assistant", "content": content])
+            } else if history.last?["role"] == "user" {
+                history.removeLast()
+            }
+            return content
+        }
+
+        if history.last?["role"] == "user" { history.removeLast() }
+        throw PawbotAIError.transport("Tool call loop exceeded 5 iterations")
+    }
+
+    struct ToolCall {
+        let id: String
+        let name: String
+        let argumentsJSON: String
+    }
+
+    struct ChatResponse {
+        let content: String?
+        let toolCalls: [ToolCall]
+    }
+
+    private func postChat(apiKey: String, model: String, messages: [[String: Any]], temperature: Double) async throws -> String {
+        let resp = try await postChatRaw(apiKey: apiKey, model: model, messages: messages, tools: nil, temperature: temperature)
+        guard let content = resp.content, !content.isEmpty else { throw PawbotAIError.noContent }
+        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func postChatWithTools(apiKey: String, messages: [[String: Any]], tools: [[String: Any]], temperature: Double) async throws -> ChatResponse {
         var lastError: Error = PawbotAIError.noContent
         let order = (cachedTextModel.map { [$0] } ?? []) + textModelCandidates.filter { $0 != cachedTextModel }
         for model in order {
             do {
-                let trimmed = try await postChat(apiKey: apiKey, model: model, messages: messages, temperature: 0.5)
+                let resp = try await postChatRaw(apiKey: apiKey, model: model, messages: messages, tools: tools, temperature: temperature)
                 cachedTextModel = model
-                history.append(["role": "assistant", "content": trimmed])
-                return trimmed
+                return resp
             } catch {
                 lastError = error
                 if case PawbotAIError.badResponse(let code, _) = error, code != 404 && code != 400 { break }
             }
         }
-        if history.last?["role"] == "user" { history.removeLast() }
         throw lastError
     }
 
-    private func postChat(apiKey: String, model: String, messages: [[String: Any]], temperature: Double) async throws -> String {
+    private func postChatRaw(apiKey: String, model: String, messages: [[String: Any]], tools: [[String: Any]]?, temperature: Double) async throws -> ChatResponse {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": 260
+            "max_tokens": 400
         ]
+        if let tools, !tools.isEmpty {
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let data: Data
@@ -1445,10 +1532,22 @@ actor PawbotAI {
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let choices = json?["choices"] as? [[String: Any]]
         let message = choices?.first?["message"] as? [String: Any]
-        guard let content = message?["content"] as? String, !content.isEmpty else {
+        let content = message?["content"] as? String
+        var toolCalls: [ToolCall] = []
+        if let raw = message?["tool_calls"] as? [[String: Any]] {
+            for tc in raw {
+                let id = tc["id"] as? String ?? UUID().uuidString
+                if let function = tc["function"] as? [String: Any],
+                   let name = function["name"] as? String {
+                    let args = function["arguments"] as? String ?? "{}"
+                    toolCalls.append(ToolCall(id: id, name: name, argumentsJSON: args))
+                }
+            }
+        }
+        if (content ?? "").isEmpty && toolCalls.isEmpty {
             throw PawbotAIError.noContent
         }
-        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ChatResponse(content: content, toolCalls: toolCalls)
     }
 
     func resetHistory() {
@@ -1601,6 +1700,125 @@ private final class SpeechFinishObserver: NSObject, AVSpeechSynthesizerDelegate,
     }
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         onFinish()
+    }
+}
+
+actor PawbotToolExecutor {
+    static let shared = PawbotToolExecutor()
+
+    func execute(name: String, argumentsJSON: String) async -> String {
+        let arguments = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any] ?? [:]
+        switch name {
+        case "get_upcoming_calendar_events":
+            return await runCalendar(limit: arguments["limit"] as? Int ?? 8)
+        case "get_recent_emails":
+            return await runEmails(limit: arguments["limit"] as? Int ?? 5)
+        case "get_recent_imessages":
+            return await runIMessages(limit: arguments["limit"] as? Int ?? 8)
+        case "look_at_screen":
+            let focus = arguments["focus"] as? String
+            return await runScreen(focus: focus)
+        case "get_morning_brief":
+            return await runMorningBrief()
+        default:
+            return "Unknown tool: \(name)"
+        }
+    }
+
+    private func runCalendar(limit: Int) async -> String {
+        do {
+            let events = try await PawbotBackend.shared.upcomingEvents(limit: limit)
+            if events.isEmpty { return "No upcoming events found." }
+            let lines = events.map { e -> String in
+                let when = e.start ?? "Time unknown"
+                let where_ = (e.location?.isEmpty == false) ? " at \(e.location!)" : ""
+                return "- \(e.title) (\(when))\(where_)"
+            }.joined(separator: "\n")
+            return "Upcoming events:\n\(lines)"
+        } catch let error as PawbotBackendError {
+            return error.errorDescription ?? "Calendar fetch failed."
+        } catch {
+            return "Calendar fetch failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func runEmails(limit: Int) async -> String {
+        do {
+            let emails = try await PawbotBackend.shared.recentGmail(limit: limit)
+            if emails.isEmpty { return "Inbox is empty." }
+            let lines = emails.map { e in
+                "- From: \(e.from) | Subject: \(e.subject)\n  Preview: \(e.snippet.prefix(200))"
+            }.joined(separator: "\n")
+            return "Recent emails:\n\(lines)"
+        } catch let error as PawbotBackendError {
+            return error.errorDescription ?? "Email fetch failed."
+        } catch {
+            return "Email fetch failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func runIMessages(limit: Int) async -> String {
+        do {
+            let texts = try await PawbotMessagesAPI.shared.recentMessages(limit: limit)
+            if texts.isEmpty { return "No recent texts." }
+            let lines = texts.map { m in
+                "- \(m.prettySender) (\(m.relativeTime)): \(m.text)"
+            }.joined(separator: "\n")
+            return "Recent iMessages:\n\(lines)"
+        } catch let error as PawbotMessagesError {
+            return error.errorDescription ?? "Texts unavailable."
+        } catch {
+            return "Texts unavailable: \(error.localizedDescription)"
+        }
+    }
+
+    private func runMorningBrief() async -> String {
+        do {
+            let brief = try await PawbotBackend.shared.morningBrief(force: false)
+            return brief.brief ?? "No brief available yet."
+        } catch let error as PawbotBackendError {
+            return error.errorDescription ?? "Morning brief unavailable."
+        } catch {
+            return "Morning brief unavailable: \(error.localizedDescription)"
+        }
+    }
+
+    private func runScreen(focus: String?) async -> String {
+        let consented = await MainActor.run { PawbotConsent.userConsentedThisSession }
+        if !consented {
+            let approved = await MainActor.run { @MainActor in
+                let alert = NSAlert()
+                alert.messageText = "Let Pawbot look at your screen?"
+                alert.informativeText = "Pawbot will take a quick screenshot of your main display to answer your question. The screenshot is sent to Grok and never saved."
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "Continue")
+                alert.addButton(withTitle: "Reject")
+                if let icon = NSImage(systemSymbolName: "eye.fill", accessibilityDescription: nil) {
+                    alert.icon = icon
+                }
+                let result = alert.runModal() == .alertFirstButtonReturn
+                if result { PawbotConsent.userConsentedThisSession = true }
+                return result
+            }
+            if !approved {
+                return "User declined to share their screen."
+            }
+        }
+
+        let captured = await PawbotScreenCapture.captureWithPermission()
+        switch captured {
+        case .denied:
+            return "Screen recording permission is not granted. Tell the user to grant it in System Settings → Privacy & Security → Screen Recording."
+        case .failed(let reason):
+            return "Couldn't grab the screen: \(reason)"
+        case .image(let image):
+            let prompt = "You are looking at a Mac screen via screenshot. " + (focus.map { "Specifically: \($0)" } ?? "Describe the foreground app and what's on it in 2-3 plain sentences for an older adult.")
+            do {
+                return try await PawbotAI.shared.describe(image: image, prompt: prompt)
+            } catch {
+                return "Couldn't describe the screen: \(error.localizedDescription)"
+            }
+        }
     }
 }
 
