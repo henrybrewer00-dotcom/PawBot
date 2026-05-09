@@ -359,7 +359,16 @@ final class PawbotModel: ObservableObject {
 
         if !isPawbotThinking { isPawbotThinking = true }
 
-        let basePrompt = "I'm helping an older adult use their computer. You're looking at their full screen with everything they have open right now. In 2-3 short, friendly sentences, plainly describe what's on the screen and what they might want help with. No jargon."
+        let basePrompt = """
+        You are Pawbot, looking at the user's full Mac screen via a live screenshot. The user is an older adult who needs help with their computer.
+
+        Reply in EXACTLY this shape, 2-3 short sentences total:
+        1. Name the specific app, website, or window that appears to be in focus right now — e.g. "Netflix", "Mail", "Safari with NYTimes open", "Microsoft Word", "FaceTime call". Do not describe the desktop wallpaper unless that's literally all that's visible.
+        2. Plainly describe what's happening in that app — e.g. "It looks like you're on the Netflix sign-in page", "There's a new email from Sarah", "You're typing a document".
+        3. Offer ONE specific, concrete help action that fits — e.g. "Want me to walk you through logging in?", "Should I read the email aloud?", "Want me to help you reply?", "Want me to make the text bigger?".
+
+        Friendly, warm, plain words. No jargon. Don't list every tab or icon. Focus on the foreground.
+        """
         let prompt: String
         if let customPrompt, !customPrompt.isEmpty {
             prompt = "\(basePrompt)\n\nThey just asked: \"\(customPrompt)\". Answer that specifically based on what's on the screen."
@@ -371,7 +380,11 @@ final class PawbotModel: ObservableObject {
             let result: String
             switch await PawbotScreenCapture.captureWithPermission() {
             case .denied:
-                result = "I need your permission to see the screen. macOS just opened (or will open) the Privacy & Security panel — flip on Pawbot under Screen Recording, and I'll try again on my own as soon as you do."
+                NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                    NSWorkspace.shared.open(url)
+                }
+                result = "macOS isn't always good at listing unsigned apps automatically — so I just opened a Finder window with Pawbot highlighted and the Screen Recording settings panel. Drag the Pawbot icon from Finder into the list, flip the switch on, and I'll spot it on my own and try again."
                 startScreenshotPolling(retryPrompt: customPrompt)
             case .failed(let reason):
                 result = "I couldn't grab the screen — \(reason)"
