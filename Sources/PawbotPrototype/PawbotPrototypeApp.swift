@@ -1658,10 +1658,52 @@ struct PawbotGmailMessage: Decodable, Identifiable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString
-        from = (try? c.decode(String.self, forKey: .from)) ?? "Unknown"
+        from = PawbotGmailMessage.flexibleString(c, key: .from, candidates: ["name", "email", "address"]) ?? "Unknown"
         subject = (try? c.decode(String.self, forKey: .subject)) ?? "(no subject)"
-        snippet = (try? c.decode(String.self, forKey: .snippet)) ?? ""
+        snippet = PawbotGmailMessage.flexibleString(c, key: .snippet, candidates: ["body", "text", "preview", "value"]) ?? ""
         date = try? c.decodeIfPresent(String.self, forKey: .date)
+    }
+
+    private static func flexibleString(_ c: KeyedDecodingContainer<CodingKeys>, key: CodingKeys, candidates: [String]) -> String? {
+        if let s = try? c.decode(String.self, forKey: key) { return s }
+        if let dict = try? c.decode([String: String].self, forKey: key) {
+            for k in candidates {
+                if let v = dict[k], !v.isEmpty { return v }
+            }
+            if let first = dict.values.first { return first }
+        }
+        if let dict = try? c.decode([String: AnyCodable].self, forKey: key) {
+            for k in candidates {
+                if let v = dict[k]?.stringValue, !v.isEmpty { return v }
+            }
+            if let first = dict.values.compactMap({ $0.stringValue }).first { return first }
+        }
+        return nil
+    }
+}
+
+struct AnyCodable: Decodable {
+    let value: Any?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { value = nil }
+        else if let s = try? container.decode(String.self) { value = s }
+        else if let i = try? container.decode(Int.self) { value = i }
+        else if let d = try? container.decode(Double.self) { value = d }
+        else if let b = try? container.decode(Bool.self) { value = b }
+        else if let arr = try? container.decode([AnyCodable].self) { value = arr.map { $0.value as Any } }
+        else if let dict = try? container.decode([String: AnyCodable].self) {
+            value = dict.mapValues { $0.value as Any }
+        } else { value = nil }
+    }
+
+    var stringValue: String? {
+        if let s = value as? String { return s }
+        if let i = value as? Int { return String(i) }
+        if let d = value as? Double { return String(d) }
+        if let b = value as? Bool { return String(b) }
+        return nil
     }
 }
 
@@ -1679,10 +1721,18 @@ struct PawbotCalendarEvent: Decodable, Identifiable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString
         title = (try? c.decode(String.self, forKey: .title)) ?? "(no title)"
-        start = try? c.decodeIfPresent(String.self, forKey: .start)
-        end = try? c.decodeIfPresent(String.self, forKey: .end)
+        start = PawbotCalendarEvent.flexibleDateString(c, key: .start)
+        end = PawbotCalendarEvent.flexibleDateString(c, key: .end)
         location = try? c.decodeIfPresent(String.self, forKey: .location)
         description = try? c.decodeIfPresent(String.self, forKey: .description)
+    }
+
+    private static func flexibleDateString(_ c: KeyedDecodingContainer<CodingKeys>, key: CodingKeys) -> String? {
+        if let s = try? c.decode(String.self, forKey: key) { return s }
+        if let dict = try? c.decode([String: String].self, forKey: key) {
+            return dict["dateTime"] ?? dict["date"] ?? dict.values.first
+        }
+        return nil
     }
 }
 
@@ -1759,7 +1809,7 @@ actor PawbotBackend {
     static let shared = PawbotBackend()
     private let baseURL = URL(string: "http://localhost:4000")!
 
-    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], notConfiguredError: PawbotBackendError) async throws -> T {
+    private func fetchData(path: String, query: [URLQueryItem], notConfiguredError: PawbotBackendError) async throws -> Data {
         var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
         if !query.isEmpty { components.queryItems = query }
         var request = URLRequest(url: components.url!)
@@ -1781,6 +1831,11 @@ actor PawbotBackend {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw PawbotBackendError.badResponse(http.statusCode, body)
         }
+        return data
+    }
+
+    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], notConfiguredError: PawbotBackendError) async throws -> T {
+        let data = try await fetchData(path: path, query: query, notConfiguredError: notConfiguredError)
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
@@ -1790,17 +1845,55 @@ actor PawbotBackend {
         }
     }
 
+    private func getArray<T: Decodable>(_ path: String, query: [URLQueryItem] = [], unwrapKeys: [String], notConfiguredError: PawbotBackendError) async throws -> [T] {
+        let data = try await fetchData(path: path, query: query, notConfiguredError: notConfiguredError)
+        if let arr = try? JSONDecoder().decode([T].self, from: data) {
+            return arr
+        }
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in unwrapKeys {
+                if let inner = obj[key], let innerData = try? JSONSerialization.data(withJSONObject: inner) {
+                    if let arr = try? JSONDecoder().decode([T].self, from: innerData) {
+                        return arr
+                    }
+                }
+            }
+            for value in obj.values {
+                if let arr = value as? [Any], !arr.isEmpty,
+                   let innerData = try? JSONSerialization.data(withJSONObject: arr),
+                   let decoded = try? JSONDecoder().decode([T].self, from: innerData) {
+                    return decoded
+                }
+            }
+        }
+        let body = String(data: data, encoding: .utf8) ?? "<binary>"
+        NSLog("[Pawbot] Array decode failure on %@\nRaw: %@", path, body.prefix(500) as CVarArg)
+        throw PawbotBackendError.decodeFailed(path: path, detail: "Could not extract list from response", rawSnippet: String(body.prefix(280)))
+    }
+
     func recentGmail(limit: Int = 5) async throws -> [PawbotGmailMessage] {
-        try await get("/api/gmail/recent", query: [URLQueryItem(name: "limit", value: "\(limit)")], notConfiguredError: .gmailNotConfigured)
+        try await getArray("/api/gmail/recent",
+                           query: [URLQueryItem(name: "limit", value: "\(limit)")],
+                           unwrapKeys: ["messages", "emails", "items", "results", "data"],
+                           notConfiguredError: .gmailNotConfigured)
     }
 
     func upcomingEvents(limit: Int = 5) async throws -> [PawbotCalendarEvent] {
-        try await get("/api/calendar/upcoming", query: [URLQueryItem(name: "limit", value: "\(limit)")], notConfiguredError: .calendarNotConfigured)
+        try await getArray("/api/calendar/upcoming",
+                           query: [URLQueryItem(name: "limit", value: "\(limit)")],
+                           unwrapKeys: ["events", "items", "results", "data"],
+                           notConfiguredError: .calendarNotConfigured)
     }
 
     func scamAlerts() async throws -> [PawbotScamAlert] {
-        let response: PawbotScamAlertsResponse = try await get("/api/scam-alerts", notConfiguredError: .notRunning)
-        return response.alerts
+        do {
+            return try await getArray("/api/scam-alerts",
+                                      unwrapKeys: ["alerts", "items"],
+                                      notConfiguredError: .notRunning)
+        } catch {
+            let response: PawbotScamAlertsResponse = try await get("/api/scam-alerts", notConfiguredError: .notRunning)
+            return response.alerts
+        }
     }
 
     func dismissScamAlert(id: String) async throws {
