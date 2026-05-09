@@ -1,4 +1,6 @@
 import AppKit
+import AVFoundation
+import Combine
 import SwiftUI
 
 @main
@@ -27,6 +29,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+struct PawbotMessage: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    let isUser: Bool
+}
+
 @MainActor
 final class PawbotModel: ObservableObject {
     @Published var isExpanded = false
@@ -36,6 +44,12 @@ final class PawbotModel: ObservableObject {
     @Published var notificationIndex = 0
     @Published var draftText = ""
     @Published var hasStartedConversation = false
+    @Published var messages: [PawbotMessage] = []
+    @Published var isPawbotThinking = false
+    @Published var fontScale: CGFloat = 1.0
+    @Published var isSpeaking = false
+
+    private let speech = PawbotSpeech()
 
     let actions = [
         PawbotAction(title: "Read aloud", subtitle: "Speak the current text", icon: "speaker.wave.2.fill", color: .blue),
@@ -68,6 +82,24 @@ final class PawbotModel: ObservableObject {
     func closePanel() {
         isExpanded = false
         showPeek = false
+        resetConversation()
+    }
+
+    func resetConversation() {
+        speech.stop()
+        isSpeaking = false
+        isPawbotThinking = false
+        hasStartedConversation = false
+        messages.removeAll()
+        draftText = ""
+        fontScale = 1.0
+        Task { await PawbotAI.shared.resetHistory() }
+    }
+
+    func goHome() {
+        withAnimation(.easeInOut(duration: 0.55)) {
+            resetConversation()
+        }
     }
 
     func dismissPeek() {
@@ -84,23 +116,129 @@ final class PawbotModel: ObservableObject {
 
     func noteTyping(_ text: String) {
         draftText = text
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        withAnimation(.easeInOut(duration: 0.85)) {
-            hasStartedConversation = true
-        }
     }
 
     func sendPrototypeMessage() {
-        guard !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        withAnimation(.easeInOut(duration: 0.85)) {
-            hasStartedConversation = true
+        let trimmed = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let userMessage = PawbotMessage(text: trimmed, isUser: true)
+        withAnimation(.easeInOut(duration: 0.55)) {
+            if !hasStartedConversation {
+                hasStartedConversation = true
+            }
+            messages.append(userMessage)
+            draftText = ""
+            isPawbotThinking = true
+        }
+
+        Task { @MainActor in
+            let reply: String
+            do {
+                reply = try await PawbotAI.shared.reply(to: trimmed)
+            } catch {
+                let detail = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+                NSLog("[Pawbot] AI error: %@", detail)
+                reply = "(Grok error — \(detail))"
+            }
+            withAnimation(.easeInOut(duration: 0.55)) {
+                isPawbotThinking = false
+                messages.append(PawbotMessage(text: reply, isUser: false))
+            }
         }
     }
+
 
     func cycleNotice() {
         withAnimation(.easeInOut(duration: 0.9)) {
             notificationIndex = (notificationIndex + 1) % notifications.count
             showPeek = true
+        }
+    }
+
+    func performAction(_ action: PawbotAction) {
+        selectedAction = action.title
+        if !hasStartedConversation {
+            withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
+        }
+        switch action.title {
+        case "Read aloud": readLatestAloud()
+        case "Make bigger": cycleFontSize()
+        case "Explain simply": lookAtScreen()
+        case "Help me reply": startReplyHelper()
+        default: break
+        }
+    }
+
+    func readLatestAloud() {
+        if isSpeaking {
+            speech.stop()
+            isSpeaking = false
+            return
+        }
+        let target: String
+        if let lastBot = messages.reversed().first(where: { !$0.isUser })?.text, !lastBot.isEmpty {
+            target = lastBot
+        } else {
+            target = "Hi there. I'm right here whenever you need me. Type a message or pick one of the buttons below."
+        }
+        appendBot("Reading that aloud for you now.")
+        isSpeaking = true
+        speech.speak(target) { [weak self] in
+            Task { @MainActor in self?.isSpeaking = false }
+        }
+    }
+
+    func cycleFontSize() {
+        let next: CGFloat
+        switch fontScale {
+        case ..<1.05: next = 1.25
+        case 1.05..<1.4: next = 1.5
+        default: next = 1.0
+        }
+        withAnimation(.easeInOut(duration: 0.55)) {
+            fontScale = next
+        }
+        let label = next == 1.0 ? "back to normal size" : (next == 1.25 ? "a bit bigger" : "much bigger")
+        appendBot("Okay — text is \(label) now. Tap Make Bigger again to change.")
+    }
+
+    func startReplyHelper() {
+        appendBot("Sure. What did the message say, and what would you like to tell them?")
+        if !hasStartedConversation {
+            withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
+        }
+    }
+
+    func lookAtScreen() {
+        if !hasStartedConversation {
+            withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
+        }
+        appendBot("One moment — let me take a look at your screen.")
+        isPawbotThinking = true
+
+        Task { @MainActor in
+            let result: String
+            do {
+                guard let image = await PawbotScreenCapture.capture() else {
+                    throw PawbotAIError.noContent
+                }
+                result = try await PawbotAI.shared.describe(image: image, prompt: "I'm helping an older adult use their computer. In 2-3 short, friendly sentences, plainly describe what's on their screen and what they might want help with. No jargon.")
+            } catch PawbotAIError.missingKey {
+                result = "I'd love to look, but I'm missing my AI key. Add one in settings and I'll try again."
+            } catch {
+                result = "I couldn't see the screen this time. macOS may need permission first — open System Settings → Privacy & Security → Screen Recording and turn on Pawbot, then try again."
+            }
+            withAnimation(.easeInOut(duration: 0.55)) {
+                isPawbotThinking = false
+                messages.append(PawbotMessage(text: result, isUser: false))
+            }
+        }
+    }
+
+    private func appendBot(_ text: String) {
+        withAnimation(.easeInOut(duration: 0.45)) {
+            messages.append(PawbotMessage(text: text, isUser: false))
         }
     }
 
@@ -131,19 +269,35 @@ struct PawbotNotice {
     let icon: String
 }
 
+final class KeyableBorderlessWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 @MainActor
 final class PawbotWindowController {
     private let model = PawbotModel()
     private let window: NSWindow
+    private var conversationCancellable: AnyCancellable?
+    private var expandCancellable: AnyCancellable?
+
+    private static let idleSize = NSSize(width: 620, height: 560)
+    private static let conversationSize = NSSize(width: 760, height: 740)
 
     init() {
         let contentView = PawbotRootView(model: model)
-        window = NSWindow(
-            contentRect: .init(x: 0, y: 0, width: 620, height: 560),
-            styleMask: [.borderless],
+        window = KeyableBorderlessWindow(
+            contentRect: .init(origin: .zero, size: Self.idleSize),
+            styleMask: [.titled, .fullSizeContentView, .closable],
             backing: .buffered,
             defer: false
         )
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.standardWindowButton(.closeButton)?.isHidden = true
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isHidden = true
+        window.isMovableByWindowBackground = true
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = false
@@ -151,20 +305,41 @@ final class PawbotWindowController {
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         window.contentView = NSHostingView(rootView: contentView)
+
+        conversationCancellable = model.$hasStartedConversation
+            .removeDuplicates()
+            .sink { [weak self] started in
+                self?.resizeWindow(forConversation: started)
+            }
+
+        expandCancellable = model.$isExpanded
+            .removeDuplicates()
+            .sink { [weak self] expanded in
+                if expanded {
+                    self?.takeKeyFocus()
+                }
+            }
     }
 
     func show() {
-        positionWindow()
+        resizeWindow(forConversation: model.hasStartedConversation, animated: false)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func positionWindow() {
+    private func takeKeyFocus() {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func resizeWindow(forConversation started: Bool, animated: Bool = true) {
         guard let screen = NSScreen.main else { return }
         let visible = screen.visibleFrame
-        let x = visible.maxX - window.frame.width - 16
-        let y = max(visible.minY + 12, visible.midY - window.frame.height / 2)
-        window.setFrameOrigin(.init(x: x, y: y))
+        let target = started ? Self.conversationSize : Self.idleSize
+        let x = visible.maxX - target.width - 16
+        let y = max(visible.minY + 12, visible.midY - target.height / 2)
+        let frame = NSRect(x: x, y: y, width: target.width, height: target.height)
+        window.setFrame(frame, display: true, animate: animated)
     }
 }
 
@@ -175,7 +350,7 @@ struct PawbotRootView: View {
 
     var body: some View {
         ZStack(alignment: .trailing) {
-            Color.clear
+            Color.clear.allowsHitTesting(false)
 
             if model.isExpanded {
                 expandedPanel
@@ -196,7 +371,10 @@ struct PawbotRootView: View {
             }
             .padding(.trailing, 12)
         }
-        .frame(width: 620, height: 560)
+        .frame(
+            width: model.hasStartedConversation ? 760 : 620,
+            height: model.hasStartedConversation ? 740 : 560
+        )
         .onAppear {
             withAnimation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true)) {
                 glow = true
@@ -282,53 +460,68 @@ struct PawbotRootView: View {
     private var expandedPanel: some View {
         VStack(alignment: .leading, spacing: model.hasStartedConversation ? 14 : 12) {
             HStack(spacing: 12) {
-                AssistantMark(isActive: true)
-                    .frame(width: 42, height: 42)
+                Button(action: model.goHome) {
+                    HStack(spacing: 12) {
+                        AssistantMark(isActive: true)
+                            .frame(width: 42, height: 42)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Pawbot")
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
-                    Text("Here when the screen gets tricky")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Pawbot")
+                                .font(.system(size: 24, weight: .bold, design: .rounded))
+                            Text(model.hasStartedConversation ? "Tap to go home" : "Here when the screen gets tricky")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .help("Back to home")
 
                 Spacer()
 
-                Button(action: model.cycleNotice) {
-                    Image(systemName: "bell.badge.fill")
-                        .font(.system(size: 20, weight: .bold))
-                        .frame(width: 42, height: 42)
-                }
-                .buttonStyle(IconButtonStyle())
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                ChatBubble(text: model.hasStartedConversation ? "I can help. What should we make easier?" : "Need help with what's on screen?", isUser: false)
-
                 if model.hasStartedConversation {
-                    ChatBubble(text: model.draftText.isEmpty ? "Can you help me with this?" : model.draftText, isUser: true)
-                    ChatBubble(text: "Sure. I’ll keep it simple and go one step at a time.", isUser: false)
+                    Button(action: model.goHome) {
+                        Image(systemName: "house.fill")
+                            .font(.system(size: 20, weight: .bold))
+                            .frame(width: 42, height: 42)
+                    }
+                    .buttonStyle(IconButtonStyle())
+                    .help("Back to home")
+                } else {
+                    Button(action: model.cycleNotice) {
+                        Image(systemName: "bell.badge.fill")
+                            .font(.system(size: 20, weight: .bold))
+                            .frame(width: 42, height: 42)
+                    }
+                    .buttonStyle(IconButtonStyle())
                 }
             }
 
             if !model.hasStartedConversation {
+                VStack(alignment: .leading, spacing: 8) {
+                    ChatBubble(text: "Need help with what's on screen?", isUser: false)
+                }
+
                 LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 10) {
                     ForEach(model.actions) { action in
                         ActionCard(action: action, isSelected: model.selectedAction == action.title) {
-                            withAnimation(.easeInOut(duration: 0.55)) {
-                                model.selectedAction = action.title
-                            }
+                            model.performAction(action)
                         }
                     }
                 }
             } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    ConversationHint(icon: "text.magnifyingglass", title: "Bigger text", message: "I can enlarge the part you’re reading.")
-                    ConversationHint(icon: "speaker.wave.2.fill", title: "Read aloud", message: "I can speak the answer slowly.")
+                ConversationScrollView(messages: model.messages, isThinking: model.isPawbotThinking, fontScale: model.fontScale)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+                HStack(spacing: 8) {
+                    ForEach(model.actions) { action in
+                        QuickActionPill(action: action, isActive: action.title == "Read aloud" && model.isSpeaking) {
+                            model.performAction(action)
+                        }
+                    }
                 }
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
             HStack(spacing: 12) {
@@ -336,17 +529,21 @@ struct PawbotRootView: View {
                     Image(systemName: "text.cursor")
                         .font(.system(size: 19, weight: .bold))
                         .foregroundStyle(.secondary)
-                    TextField("Ask Pawbot...", text: Binding(
-                        get: { model.draftText },
-                        set: { model.noteTyping($0) }
-                    ))
-                    .font(.system(size: 19, weight: .semibold, design: .rounded))
-                    .textFieldStyle(.plain)
-                    .onSubmit(model.sendPrototypeMessage)
+                    PawbotInputField(
+                        text: Binding(get: { model.draftText }, set: { model.noteTyping($0) }),
+                        placeholder: "Ask Pawbot...",
+                        fontSize: 19 * model.fontScale,
+                        onSubmit: model.sendPrototypeMessage
+                    )
+                    .frame(height: 30)
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 52)
-                .background(.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.blue.opacity(0.35), lineWidth: 1.5)
+                )
 
                 Button(action: model.pulseVoice) {
                     Image(systemName: model.isListening ? "waveform" : "mic.fill")
@@ -361,7 +558,11 @@ struct PawbotRootView: View {
             }
         }
         .padding(18)
-        .frame(width: model.hasStartedConversation ? 500 : 390)
+        .frame(
+            width: model.hasStartedConversation ? 600 : 390,
+            height: model.hasStartedConversation ? 640 : nil,
+            alignment: .top
+        )
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 26, style: .continuous)
@@ -433,18 +634,92 @@ struct AssistantMark: View {
     }
 }
 
+struct ConversationScrollView: View {
+    let messages: [PawbotMessage]
+    let isThinking: Bool
+    let fontScale: CGFloat
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 10) {
+                    ChatBubble(text: "Hi — I'm right here. What can I help you with?", isUser: false, fontScale: fontScale)
+                        .id("intro")
+
+                    ForEach(messages) { message in
+                        ChatBubble(text: message.text, isUser: message.isUser, fontScale: fontScale)
+                            .id(message.id)
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: message.isUser ? .trailing : .leading)),
+                                removal: .opacity
+                            ))
+                    }
+
+                    if isThinking {
+                        ThinkingBubble()
+                            .id("thinking")
+                            .transition(.opacity)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .onChange(of: messages.count) { _, _ in
+                scrollToBottom(proxy: proxy)
+            }
+            .onChange(of: isThinking) { _, _ in
+                scrollToBottom(proxy: proxy)
+            }
+        }
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy) {
+        let target: AnyHashable = isThinking
+            ? AnyHashable("thinking")
+            : (messages.last.map { AnyHashable($0.id) } ?? AnyHashable("intro"))
+        withAnimation(.easeInOut(duration: 0.45)) {
+            proxy.scrollTo(target, anchor: .bottom)
+        }
+    }
+}
+
+struct ThinkingBubble: View {
+    @State private var phase: CGFloat = 0
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .fill(.secondary)
+                    .frame(width: 8, height: 8)
+                    .opacity(0.4 + 0.6 * abs(sin(phase + CGFloat(i) * 0.6)))
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(Color.white.opacity(0.56), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: false)) {
+                phase = .pi * 2
+            }
+        }
+    }
+}
+
 struct ChatBubble: View {
     let text: String
     let isUser: Bool
+    var fontScale: CGFloat = 1.0
 
     var body: some View {
         Text(text)
-            .font(.system(size: 19, weight: .semibold, design: .rounded))
+            .font(.system(size: 19 * fontScale, weight: .semibold, design: .rounded))
             .foregroundStyle(isUser ? .white : .primary)
             .padding(.horizontal, 15)
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(isUser ? Color.blue : Color.white.opacity(0.56), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .textSelection(.enabled)
     }
 }
 
@@ -537,5 +812,309 @@ struct IconButtonStyle: ButtonStyle {
             .foregroundStyle(.primary)
             .background(.white.opacity(configuration.isPressed ? 0.82 : 0.56), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
+    }
+}
+
+enum PawbotAIError: Error, LocalizedError {
+    case missingKey
+    case badResponse(Int, String)
+    case noContent
+    case transport(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingKey: return "AI key missing"
+        case .badResponse(let code, let body):
+            let snippet = body.prefix(220)
+            return "AI HTTP \(code): \(snippet)"
+        case .noContent: return "AI returned no content"
+        case .transport(let detail): return "Network error: \(detail)"
+        }
+    }
+}
+
+actor PawbotAI {
+    static let shared = PawbotAI()
+
+    private let session: URLSession
+    private let apiKey: String?
+    private let endpoint = URL(string: "https://api.x.ai/v1/chat/completions")!
+    private let textModelCandidates = ["grok-3-latest", "grok-3", "grok-2-latest", "grok-beta"]
+    private let visionModelCandidates = ["grok-3-vision-latest", "grok-2-vision-latest", "grok-2-vision-1212"]
+    private let systemPrompt = """
+    You are Pawbot, a calm and patient assistant designed to help older adults \
+    with what's on their computer screen. Speak gently. Use short sentences and \
+    plain words. Offer one step at a time. Never use jargon. If asked to read \
+    aloud, explain, enlarge text, or help reply to a message, walk them through \
+    it kindly. Keep responses under 3 sentences unless they ask for more.
+    """
+
+    private var history: [[String: String]] = []
+
+    init() {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForResource = 14
+        self.session = URLSession(configuration: config)
+        self.apiKey = Self.loadAPIKey()
+    }
+
+    private static func loadAPIKey() -> String? {
+        let env = ProcessInfo.processInfo.environment
+        for name in ["XAI_API_KEY", "GROK_API_KEY"] {
+            if let value = env[name], !value.isEmpty { return value }
+        }
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        guard let path = support?.appendingPathComponent("Pawbot/xai_api_key") else { return nil }
+        guard let data = try? Data(contentsOf: path) else { return nil }
+        let key = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (key?.isEmpty == false) ? key : nil
+    }
+
+    var isConfigured: Bool { apiKey != nil }
+
+    func reply(to userText: String) async throws -> String {
+        guard let apiKey else { throw PawbotAIError.missingKey }
+
+        history.append(["role": "user", "content": userText])
+        let messages: [[String: String]] = [["role": "system", "content": systemPrompt]] + history.suffix(20)
+
+        var lastError: Error = PawbotAIError.noContent
+        for model in textModelCandidates {
+            do {
+                let trimmed = try await postChat(apiKey: apiKey, model: model, messages: messages, temperature: 0.5)
+                history.append(["role": "assistant", "content": trimmed])
+                return trimmed
+            } catch {
+                lastError = error
+                if case PawbotAIError.badResponse(let code, _) = error, code != 404 && code != 400 { break }
+            }
+        }
+        throw lastError
+    }
+
+    private func postChat(apiKey: String, model: String, messages: [[String: Any]], temperature: Double) async throws -> String {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let body: [String: Any] = [
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": 260
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw PawbotAIError.transport(error.localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw PawbotAIError.transport("no http response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let bodyText = String(data: data, encoding: .utf8) ?? ""
+            throw PawbotAIError.badResponse(http.statusCode, bodyText)
+        }
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let choices = json?["choices"] as? [[String: Any]]
+        let message = choices?.first?["message"] as? [String: Any]
+        guard let content = message?["content"] as? String, !content.isEmpty else {
+            throw PawbotAIError.noContent
+        }
+        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func resetHistory() {
+        history.removeAll()
+    }
+
+    func describe(image: NSImage, prompt: String) async throws -> String {
+        guard let apiKey else { throw PawbotAIError.missingKey }
+        guard let pngData = image.pngData() else { throw PawbotAIError.noContent }
+        let base64 = pngData.base64EncodedString()
+        let dataURL = "data:image/png;base64,\(base64)"
+
+        let messages: [[String: Any]] = [
+            ["role": "system", "content": systemPrompt],
+            ["role": "user", "content": [
+                ["type": "text", "text": prompt],
+                ["type": "image_url", "image_url": ["url": dataURL]]
+            ]]
+        ]
+
+        var lastError: Error = PawbotAIError.noContent
+        for model in visionModelCandidates {
+            do {
+                return try await postChat(apiKey: apiKey, model: model, messages: messages, temperature: 0.4)
+            } catch {
+                lastError = error
+                if case PawbotAIError.badResponse(let code, _) = error, code != 404 && code != 400 { break }
+            }
+        }
+        throw lastError
+    }
+}
+
+extension NSImage {
+    func pngData() -> Data? {
+        guard let tiff = tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+}
+
+@MainActor
+final class PawbotSpeech {
+    private let synth = AVSpeechSynthesizer()
+
+    func speak(_ text: String, completion: @escaping () -> Void) {
+        synth.stopSpeaking(at: .immediate)
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.92
+        utterance.pitchMultiplier = 1.05
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        let delegate = SpeechFinishObserver(onFinish: completion)
+        Self.observers.append(delegate)
+        synth.delegate = delegate
+        synth.speak(utterance)
+    }
+
+    func stop() {
+        synth.stopSpeaking(at: .immediate)
+    }
+
+    private static var observers: [SpeechFinishObserver] = []
+}
+
+private final class SpeechFinishObserver: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
+    let onFinish: () -> Void
+    init(onFinish: @escaping () -> Void) { self.onFinish = onFinish }
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        onFinish()
+    }
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        onFinish()
+    }
+}
+
+enum PawbotScreenCapture {
+    @MainActor
+    static func capture() async -> NSImage? {
+        guard let displayID = NSScreen.main?.displayID else { return nil }
+        guard let cgImage = CGDisplayCreateImage(displayID) else { return nil }
+        let size = NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
+        return NSImage(cgImage: cgImage, size: size)
+    }
+}
+
+extension NSScreen {
+    var displayID: CGDirectDisplayID? {
+        deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+    }
+}
+
+struct PawbotInputField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let fontSize: CGFloat
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, onSubmit: onSubmit)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = FocusableTextField(string: text)
+        field.placeholderString = placeholder
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.bezelStyle = .roundedBezel
+        field.isBezeled = false
+        field.font = .systemFont(ofSize: fontSize, weight: .semibold)
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.commit(_:))
+        field.cell?.usesSingleLineMode = true
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak field] in
+            field?.window?.makeFirstResponder(field)
+        }
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+        nsView.font = .systemFont(ofSize: fontSize, weight: .semibold)
+        context.coordinator.text = $text
+        context.coordinator.onSubmit = onSubmit
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var text: Binding<String>
+        var onSubmit: () -> Void
+
+        init(text: Binding<String>, onSubmit: @escaping () -> Void) {
+            self.text = text
+            self.onSubmit = onSubmit
+        }
+
+        nonisolated func controlTextDidChange(_ notification: Notification) {
+            let value = (notification.object as? NSTextField)?.stringValue ?? ""
+            MainActor.assumeIsolated {
+                text.wrappedValue = value
+            }
+        }
+
+        @objc func commit(_ sender: NSTextField) {
+            text.wrappedValue = sender.stringValue
+            onSubmit()
+        }
+    }
+}
+
+final class FocusableTextField: NSTextField {
+    override var acceptsFirstResponder: Bool { true }
+
+    override func becomeFirstResponder() -> Bool {
+        let result = super.becomeFirstResponder()
+        if result, let editor = currentEditor() as? NSTextView {
+            editor.insertionPointColor = .controlAccentColor
+        }
+        return result
+    }
+}
+
+struct QuickActionPill: View {
+    let action: PawbotAction
+    let isActive: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 6) {
+                Image(systemName: action.icon)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(isActive ? .white : action.color)
+                Text(action.title)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(isActive ? .white : .primary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(isActive ? action.color.opacity(0.95) : .white.opacity(0.62), in: Capsule())
+            .overlay(Capsule().stroke(action.color.opacity(0.4), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
     }
 }

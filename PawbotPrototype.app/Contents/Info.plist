@@ -28,5 +28,7 @@
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Pawbot needs to see your screen so it can read and explain what's there.</string>
 </dict>
 </plist>
