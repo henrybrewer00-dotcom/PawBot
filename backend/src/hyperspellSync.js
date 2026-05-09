@@ -3,22 +3,60 @@ import { writeAgentLog } from "./agentLog.js";
 import { createCalendarEvent, createScamAlert } from "./domain.js";
 import { getUserAuthProfile, queryMemory } from "./hyperspell.js";
 import { saveFactMemory } from "./nia.js";
+import { grokChat } from "./grok.js";
 
 const CALENDAR_QUERY = "upcoming events this week birthdays appointments";
 const SCAM_QUERY = "suspicious emails verification codes Netflix billing PayPal unusual login";
+const IMPORTANT_EMAIL_QUERY = "emails from the past couple days notices appointments bills letters landlord property lease tenant delivery account renewal service official family caregivers medical banking";
 const SCAM_SIGNALS = [
   "verification code",
   "unusual login",
-  "urgent",
   "password",
-  "billing",
   "paypal",
   "netflix",
   "gift card",
   "wire transfer",
-  "click",
   "suspended",
-  "verify"
+  "verify your account",
+  "click here to confirm",
+  "limited time offer",
+  "you have won"
+];
+const IMPORTANT_SIGNALS = [
+  "appointment",
+  "bill",
+  "invoice",
+  "payment",
+  "doctor",
+  "medical",
+  "pharmacy",
+  "family",
+  "caregiver",
+  "security",
+  "bank",
+  "insurance",
+  "deadline",
+  "confirm",
+  "schedule",
+  "notice",
+  "entry",
+  "landlord",
+  "property",
+  "lease",
+  "tenant",
+  "rent",
+  "renewal",
+  "account",
+  "subscription",
+  "delivery",
+  "package",
+  "order",
+  "letter",
+  "official",
+  "reminder",
+  "due",
+  "expire",
+  "action required"
 ];
 
 const PROVIDER_ALIASES = new Map([
@@ -74,7 +112,7 @@ function titleFromDocument(document, fallback) {
 function dateFromDocument(document) {
   const raw = typeof document === "string"
     ? null
-    : document?.date ?? document?.start_time ?? document?.startTime ?? document?.starts_at ?? document?.metadata?.date ?? document?.metadata?.start_time;
+    : document?.start_at ?? document?.date ?? document?.start_time ?? document?.startTime ?? document?.starts_at ?? document?.metadata?.date ?? document?.metadata?.start_time;
   const parsed = raw ? new Date(raw) : null;
   return parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : null;
 }
@@ -84,9 +122,32 @@ function sourceFromDocument(document) {
   return String(document?.from ?? document?.sender ?? document?.source ?? document?.metadata?.from ?? document?.metadata?.sender ?? "Google Mail");
 }
 
-function riskLevelFor(text) {
+function emailSubjectFromDocument(document, fallback = "Email") {
+  if (typeof document === "string") return fallback;
+  return String(document?.subject ?? document?.title ?? document?.name ?? document?.metadata?.subject ?? document?.metadata?.title ?? fallback).trim();
+}
+
+function emailDateFromDocument(document) {
+  if (typeof document === "string") return null;
+  const raw = document?.date ??
+    document?.received_at ??
+    document?.receivedAt ??
+    document?.created_at ??
+    document?.createdAt ??
+    document?.metadata?.date ??
+    document?.metadata?.received_at ??
+    document?.metadata?.receivedAt;
+  const parsed = raw ? new Date(raw) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
+function signalMatches(text, signals) {
   const normalized = text.toLowerCase();
-  const signalCount = SCAM_SIGNALS.filter((signal) => normalized.includes(signal)).length;
+  return signals.filter((signal) => normalized.includes(signal));
+}
+
+function riskLevelFor(text) {
+  const signalCount = signalMatches(text, SCAM_SIGNALS).length;
   return signalCount >= 2 ? "high" : "medium";
 }
 
@@ -112,7 +173,14 @@ async function hasScamDuplicateToday(store, seniorId, summary) {
 export async function syncCalendarEvents(store, seniorId) {
   if (!await isConnected(store, seniorId, "google_calendar")) return [];
 
-  const documents = await queryMemory(seniorId, CALENDAR_QUERY, ["google_calendar"]);
+  const now = new Date();
+  const twoWeeksOut = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+  const documents = await queryMemory(
+    seniorId,
+    CALENDAR_QUERY,
+    ["google_calendar"],
+    { effort: 1, options: { after: now.toISOString(), before: twoWeeksOut.toISOString(), max_results: 20 } }
+  );
   const created = [];
 
   for (const document of documents) {
@@ -168,6 +236,109 @@ export async function scanEmailsForScams(store, seniorId) {
 
   void writeAgentLog(store, seniorId, "hyperspell_mail_scam_scan", { query: SCAM_QUERY }, { created: created.length });
   return created;
+}
+
+export async function runEmailSummaryAgent(store, seniorId, { days = 2 } = {}) {
+  if (!await isConnected(store, seniorId, "google_mail")) {
+    return {
+      connected: false,
+      importantEmails: [],
+      scamAlerts: [],
+      summary: "Gmail is not connected for this senior."
+    };
+  }
+
+  const query = `${IMPORTANT_EMAIL_QUERY} last ${days} days`;
+  const documents = await queryMemory(seniorId, query, ["gmail"]);
+  const importantEmails = [];
+  const scamAlerts = [];
+
+  for (const document of documents.slice(0, 20)) {
+    const text = textFromDocument(document);
+    if (!text) continue;
+
+    const scamSignals = signalMatches(text, SCAM_SIGNALS);
+    const importantSignals = signalMatches(text, IMPORTANT_SIGNALS);
+    const subject = emailSubjectFromDocument(document);
+    const sender = sourceFromDocument(document);
+    const receivedAt = emailDateFromDocument(document);
+    const summary = text.replace(/\s+/g, " ").trim().slice(0, 300);
+
+    if (scamSignals.length > 0) {
+      if (!await hasScamDuplicateToday(store, seniorId, summary)) {
+        scamAlerts.push(await createScamAlert(store, {
+          seniorId,
+          source: sender,
+          riskLevel: riskLevelFor(text),
+          summary: `${subject}: ${summary}`,
+          actionTaken: "marked_as_scam_from_email_summary",
+          caretakerNotified: false
+        }));
+      }
+      continue;
+    }
+
+    if (importantSignals.length > 0 || importantEmails.length < 15) {
+      importantEmails.push({
+        subject,
+        sender,
+        receivedAt,
+        whyImportant: importantSignals.slice(0, 4),
+        summary
+      });
+    }
+  }
+
+  let summary;
+  if (importantEmails.length) {
+    const emailList = importantEmails
+      .map((e, i) => `${i + 1}. Subject: "${e.subject}" | From: ${e.sender} | Snippet: ${e.summary}`)
+      .join("\n");
+    try {
+      summary = await grokChat([
+        {
+          role: "system",
+          content: "You are a concise email assistant helping an elderly person's caretaker. Summarize the following emails in 2-4 plain sentences. Highlight anything time-sensitive or that requires action. Be warm, clear, and brief — no bullet points, no headers."
+        },
+        {
+          role: "user",
+          content: `Here are ${importantEmails.length} important email(s) from the last ${days} day(s):\n\n${emailList}`
+        }
+      ]);
+    } catch {
+      summary = importantEmails.map((e, i) => `${i + 1}. ${e.subject} from ${e.sender}: ${e.summary}`).join("\n");
+    }
+  } else {
+    summary = `No important non-scam emails found in the last ${days} days.`;
+  }
+
+  await writeAgentLog(
+    store,
+    seniorId,
+    "gmail_email_summary",
+    { query, days },
+    {
+      importantCount: importantEmails.length,
+      scamCount: scamAlerts.length,
+      importantEmails,
+      scamAlertIds: scamAlerts.map((alert) => alert.id),
+      summary
+    }
+  );
+
+  await saveFactMemory(seniorId, "gmail-email-summary", {
+    days,
+    importantCount: importantEmails.length,
+    scamCount: scamAlerts.length,
+    summary
+  });
+
+  return {
+    connected: true,
+    importantEmails,
+    scamAlerts,
+    summary
+  };
 }
 
 export async function syncProvider(store, seniorId, provider) {

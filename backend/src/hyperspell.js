@@ -79,6 +79,7 @@ export async function getConnectUrl(seniorId, provider, redirectUrl, userToken) 
     const url = new URL("https://connect.hyperspell.com");
     url.searchParams.set("token", token);
     url.searchParams.set("providers", provider);
+    url.searchParams.set("syncMemories", "true");
     url.searchParams.set("popup", "false");
     url.searchParams.set("autoclose", "true");
     if (redirectUrl) url.searchParams.set("redirect_uri", redirectUrl);
@@ -90,17 +91,14 @@ export async function getConnectUrl(seniorId, provider, redirectUrl, userToken) 
   }
 }
 
-export async function queryMemory(seniorId, query, sources) {
+export async function queryMemory(seniorId, query, sources, { effort = 0, options = {} } = {}) {
   if (!config.hyperspell.apiKey) return [];
 
   try {
     const response = await hyperspellRequest("/memories/query", {
       method: "POST",
       seniorId,
-      body: {
-        query,
-        sources
-      }
+      body: { query, sources, effort, options }
     });
     return response?.documents ?? response?.results ?? response?.memories ?? [];
   } catch (error) {
