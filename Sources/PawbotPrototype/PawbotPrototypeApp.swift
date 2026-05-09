@@ -197,7 +197,9 @@ final class PawbotModel: ObservableObject {
         } else {
             target = "Hi there. I'm right here whenever you need me. Type a message or pick one of the buttons below."
         }
-        appendBot("Reading that aloud for you now.")
+        let reply = "Reading that aloud for you now."
+        appendBot(reply)
+        recordSyntheticExchange(user: "Read that aloud, please.", assistant: reply)
         isSpeaking = true
         speech.speak(target) { [weak self] in
             Task { @MainActor in self?.isSpeaking = false }
@@ -215,14 +217,22 @@ final class PawbotModel: ObservableObject {
             fontScale = next
         }
         let label = next == 1.0 ? "back to normal size" : (next == 1.25 ? "a bit bigger" : "much bigger")
-        appendBot("Okay — text is \(label) now. Tap Make Bigger again to change.")
+        let reply = "Okay — text is \(label) now. Tap Make Bigger again to change."
+        appendBot(reply)
+        recordSyntheticExchange(user: "Make the text bigger.", assistant: reply)
     }
 
     func startReplyHelper() {
-        appendBot("Sure. What did the message say, and what would you like to tell them?")
+        let reply = "Sure. What did the message say, and what would you like to tell them?"
+        appendBot(reply)
+        recordSyntheticExchange(user: "Help me write a reply.", assistant: reply)
         if !hasStartedConversation {
             withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
         }
+    }
+
+    private func recordSyntheticExchange(user: String, assistant: String) {
+        Task { await PawbotAI.shared.recordExchange(user: user, assistant: assistant) }
     }
 
     func lookAtScreen(prompt customPrompt: String? = nil) {
@@ -249,6 +259,8 @@ final class PawbotModel: ObservableObject {
             case .image(let image):
                 do {
                     result = try await PawbotAI.shared.describe(image: image, prompt: prompt)
+                    let userTurn = customPrompt ?? "Pawbot, look at my screen and tell me what's on it."
+                    await PawbotAI.shared.recordExchange(user: userTurn, assistant: "(Looked at the screen.) \(result)")
                 } catch PawbotAIError.missingKey {
                     result = "I'd love to look, but I'm missing my AI key."
                 } catch {
@@ -873,9 +885,10 @@ actor PawbotAI {
     private let apiKey: String?
     private let endpoint = URL(string: "https://api.x.ai/v1/chat/completions")!
     private let textModelCandidates = ["grok-2-latest", "grok-3-latest", "grok-3", "grok-beta"]
-    private let visionModelCandidates = ["grok-2-vision-latest", "grok-3-vision-latest", "grok-2-vision-1212"]
+    private let visionModelCandidates = ["grok-2-vision-latest", "grok-3-vision-latest", "grok-vision-beta", "grok-2-vision-1212"]
     private var cachedTextModel: String?
     private var cachedVisionModel: String?
+    private var discoveredModels: [String]?
     private let systemPrompt = """
     You are Pawbot, a calm and patient assistant designed to help older adults \
     with what's on their computer screen. Speak gently. Use short sentences and \
@@ -927,6 +940,7 @@ actor PawbotAI {
                 if case PawbotAIError.badResponse(let code, _) = error, code != 404 && code != 400 { break }
             }
         }
+        if history.last?["role"] == "user" { history.removeLast() }
         throw lastError
     }
 
@@ -970,6 +984,28 @@ actor PawbotAI {
         history.removeAll()
     }
 
+    func recordExchange(user: String, assistant: String) {
+        history.append(["role": "user", "content": user])
+        history.append(["role": "assistant", "content": assistant])
+    }
+
+    private func discoverModels() async -> [String] {
+        if let discoveredModels { return discoveredModels }
+        guard let apiKey else { return [] }
+        var request = URLRequest(url: URL(string: "https://api.x.ai/v1/models")!)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, _) = try await session.data(for: request)
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let list = json?["data"] as? [[String: Any]] ?? []
+            let ids = list.compactMap { $0["id"] as? String }
+            discoveredModels = ids
+            return ids
+        } catch {
+            return []
+        }
+    }
+
     func describe(image: NSImage, prompt: String) async throws -> String {
         guard let apiKey else { throw PawbotAIError.missingKey }
         guard let pngData = image.pngData() else { throw PawbotAIError.noContent }
@@ -985,7 +1021,15 @@ actor PawbotAI {
         ]
 
         var lastError: Error = PawbotAIError.noContent
-        let order = (cachedVisionModel.map { [$0] } ?? []) + visionModelCandidates.filter { $0 != cachedVisionModel }
+        let discovered = await discoverModels()
+        let visionFromDiscovery = discovered.filter { id in
+            let lower = id.lowercased()
+            return lower.contains("vision") || lower.contains("image")
+        }
+        var order = (cachedVisionModel.map { [$0] } ?? [])
+        for m in visionFromDiscovery where !order.contains(m) { order.append(m) }
+        for m in visionModelCandidates where !order.contains(m) { order.append(m) }
+
         for model in order {
             do {
                 let result = try await postChat(apiKey: apiKey, model: model, messages: messages, temperature: 0.4)
@@ -996,7 +1040,11 @@ actor PawbotAI {
                 if case PawbotAIError.badResponse(let code, _) = error, code != 404 && code != 400 { break }
             }
         }
-        throw lastError
+        if discovered.isEmpty {
+            throw lastError
+        }
+        let detail = (lastError as? LocalizedError)?.errorDescription ?? "\(lastError)"
+        throw PawbotAIError.transport("\(detail). Available models: \(discovered.joined(separator: ", "))")
     }
 }
 
