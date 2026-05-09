@@ -16,6 +16,13 @@ const niaApiKey = () => {
   return process.env.NIA_API_KEY ?? "";
 };
 
+const hyperspellApiKey = () => {
+  if (process.env.NODE_ENV === "test" && process.env.HYPERSPELL_ENABLE_IN_TESTS !== "true") {
+    return "";
+  }
+  return process.env.HYPERSPELL_API_KEY ?? "";
+};
+
 export const config = {
   port: numberFromEnv("PORT", 4000),
   publicBaseUrl: process.env.PUBLIC_BASE_URL ?? "http://localhost:4000",
@@ -26,6 +33,11 @@ export const config = {
   },
   nia: {
     apiKey: niaApiKey()
+  },
+  hyperspell: {
+    apiKey: hyperspellApiKey(),
+    syncHours: numberFromEnv("HYPERSPELL_SYNC_HOURS", 6),
+    publicBaseUrl: process.env.PUBLIC_BASE_URL ?? "http://localhost:4000"
   },
   agent: {
     pollSeconds: numberFromEnv("AGENT_POLL_SECONDS", 30),

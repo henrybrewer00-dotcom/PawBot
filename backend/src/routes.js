@@ -1,5 +1,6 @@
 import express from "express";
-import { asyncHandler, requireFields } from "./http.js";
+import { asyncHandler, HttpError, requireFields } from "./http.js";
+import { config } from "./config.js";
 import {
   createCalendarEvent,
   createMedication,
@@ -18,6 +19,19 @@ import {
   updateMedication
 } from "./domain.js";
 import { searchSeniorMemory } from "./nia.js";
+import { createUserToken, getConnectUrl, HYPERSPELL_PROVIDERS } from "./hyperspell.js";
+import {
+  recordHyperspellConnection,
+  scanEmailsForScams,
+  syncCalendarEvents,
+  syncProvider
+} from "./hyperspellSync.js";
+
+function requireHyperspellProvider(provider) {
+  if (!HYPERSPELL_PROVIDERS.has(provider)) {
+    throw new HttpError(400, "provider must be google_calendar or google_mail");
+  }
+}
 
 export function createRouter(store) {
   const router = express.Router();
@@ -107,6 +121,29 @@ export function createRouter(store) {
     res.json({ query, results });
   }));
 
+  router.post("/api/seniors/:seniorId/hyperspell/connect", asyncHandler(async (req, res) => {
+    requireFields(req.body, ["provider"]);
+    requireHyperspellProvider(req.body.provider);
+
+    const redirectUrl = req.body.redirectUrl ?? `${config.hyperspell.publicBaseUrl}/webhooks/hyperspell/connected`;
+    const userToken = await createUserToken(req.params.seniorId);
+    const connect = await getConnectUrl(req.params.seniorId, req.body.provider, redirectUrl, userToken);
+    res.json(connect ?? { url: null, expires_at: null });
+  }));
+
+  router.get("/api/seniors/:seniorId/hyperspell/connections", (req, res) => {
+    const connections = store
+      .all("hyperspellConnections")
+      .filter((connection) => connection.seniorId === req.params.seniorId);
+    res.json(connections);
+  });
+
+  router.post("/api/seniors/:seniorId/hyperspell/sync", asyncHandler(async (req, res) => {
+    const calendarEvents = await syncCalendarEvents(store, req.params.seniorId);
+    const scamAlerts = await scanEmailsForScams(store, req.params.seniorId);
+    res.json({ calendarEvents: calendarEvents.length, scamAlerts: scamAlerts.length });
+  }));
+
   router.post("/api/agent/tick", asyncHandler(async (req, res) => {
     const results = await runMedicationAgentTick(store);
     res.json({ ran: true, actions: results.length, results });
@@ -119,6 +156,15 @@ export function createRouter(store) {
   router.post("/webhooks/sendblue/status", (req, res) => {
     res.json({ ok: true });
   });
+
+  router.post("/webhooks/hyperspell/connected", asyncHandler(async (req, res) => {
+    requireFields(req.body, ["seniorId", "provider"]);
+    requireHyperspellProvider(req.body.provider);
+
+    const connection = recordHyperspellConnection(store, req.body);
+    const synced = await syncProvider(store, req.body.seniorId, req.body.provider);
+    res.json({ connection, synced });
+  }));
 
   return router;
 }

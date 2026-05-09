@@ -13,7 +13,8 @@ const emptyState = () => ({
   medicationLogs: [],
   calendarEvents: [],
   scamAlerts: [],
-  agentLogs: []
+  agentLogs: [],
+  hyperspellConnections: []
 });
 
 export class JsonStore {
