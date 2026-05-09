@@ -1,0 +1,5 @@
+.build/
+.git.backup-before-push/
+PawbotPrototype.app/Contents/MacOS/PawbotPrototype
+.DS_Store
+xcuserdata/
