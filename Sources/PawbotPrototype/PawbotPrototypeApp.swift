@@ -59,7 +59,7 @@ final class PawbotModel: ObservableObject {
         PawbotAction(title: "Explain my screen", subtitle: "See and explain it plainly", icon: "eye.fill", color: .orange),
         PawbotAction(title: "My Messages", subtitle: "Read or reply to a text", icon: "message.fill", color: .pink),
         PawbotAction(title: "Make bigger", subtitle: "Increase screen text", icon: "textformat.size", color: .green),
-        PawbotAction(title: "Help me reply", subtitle: "Draft a friendly answer", icon: "bubble.left.and.bubble.right.fill", color: .indigo)
+        PawbotAction(title: "Check my stuff", subtitle: "Texts + emails together", icon: "tray.full.fill", color: .indigo)
     ]
 
     let notifications = [
@@ -220,7 +220,7 @@ final class PawbotModel: ObservableObject {
         case "Explain my screen": lookAtScreen()
         case "My Messages": openMessages()
         case "Make bigger": cycleFontSize()
-        case "Help me reply": startReplyHelper()
+        case "Check my stuff": checkMyStuff()
         default: break
         }
     }
@@ -295,12 +295,57 @@ final class PawbotModel: ObservableObject {
         recordSyntheticExchange(user: "Make the text bigger.", assistant: reply)
     }
 
-    func startReplyHelper() {
-        let reply = "Sure. What did the message say, and what would you like to tell them?"
-        appendBot(reply)
-        recordSyntheticExchange(user: "Help me write a reply.", assistant: reply)
+    func checkMyStuff() {
         if !hasStartedConversation {
             withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
+        }
+        isPawbotThinking = true
+
+        Task { @MainActor in
+            var sections: [String] = []
+            var aiContextChunks: [String] = []
+
+            do {
+                let texts = try await PawbotMessagesAPI.shared.recentMessages(limit: 5)
+                if !texts.isEmpty {
+                    let lines = texts.map { "• \($0.prettySender) (\($0.relativeTime)): \($0.text)" }.joined(separator: "\n")
+                    sections.append("📱 Recent texts\n\(lines)")
+                    aiContextChunks.append("Recent iMessages:\n\(lines)")
+                }
+            } catch let error as PawbotMessagesError {
+                if case .fullDiskAccessRequired = error {
+                    sections.append("📱 Texts — I need Full Disk Access to read these. Open Privacy & Security → Full Disk Access and turn on Pawbot.")
+                }
+            } catch {}
+
+            do {
+                let emails = try await PawbotBackend.shared.recentGmail(limit: 5)
+                if !emails.isEmpty {
+                    let lines = emails.map { "• \($0.from): \($0.subject)\n  \($0.snippet)" }.joined(separator: "\n")
+                    sections.append("✉️ Recent emails\n\(lines)")
+                    aiContextChunks.append("Recent Gmail:\n\(lines)")
+                }
+            } catch let error as PawbotBackendError {
+                if case .notRunning = error {
+                    sections.append("✉️ Email — the backend isn't running. Start it with `cd backend && npm run dev` to see Gmail here.")
+                } else if case .gmailNotConfigured = error {
+                    sections.append("✉️ Email — Gmail isn't connected yet. Set up Insforge OAuth in the backend to enable this.")
+                }
+            } catch {}
+
+            isPawbotThinking = false
+            if sections.isEmpty {
+                appendBot("I couldn't reach your texts or emails right now. Make sure Pawbot has Full Disk Access for texts, and the backend is running for email.")
+                return
+            }
+
+            let combined = sections.joined(separator: "\n\n")
+            appendBot("Here's what's new for you:\n\n\(combined)")
+
+            if !aiContextChunks.isEmpty {
+                let context = "I just showed the user a 'Check my stuff' summary:\n\n\(aiContextChunks.joined(separator: "\n\n"))\n\nIf they ask about any specific item ('read Sarah's text', 'help me reply to that email'), you already know the content. Offer to read aloud or help draft a reply."
+                Task { await PawbotAI.shared.recordExchange(user: "[Pawbot pulled recent texts and emails]", assistant: context) }
+            }
         }
     }
 
@@ -1359,6 +1404,58 @@ final class PawbotVoiceInput {
         task = nil
         request = nil
         isRecording = false
+    }
+}
+
+struct PawbotGmailMessage: Decodable {
+    let id: String
+    let from: String
+    let subject: String
+    let snippet: String
+    let date: String?
+}
+
+enum PawbotBackendError: Error, LocalizedError {
+    case notRunning
+    case gmailNotConfigured
+    case badResponse(Int, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .notRunning: return "Backend isn't running. Start it with `cd backend && npm run dev`."
+        case .gmailNotConfigured: return "Gmail isn't connected yet. Set up Insforge OAuth in the backend."
+        case .badResponse(let code, let body): return "Backend returned HTTP \(code): \(body.prefix(160))"
+        }
+    }
+}
+
+actor PawbotBackend {
+    static let shared = PawbotBackend()
+    private let baseURL = URL(string: "http://localhost:4000")!
+
+    func recentGmail(limit: Int = 5) async throws -> [PawbotGmailMessage] {
+        var components = URLComponents(url: baseURL.appendingPathComponent("/api/gmail/recent"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 6
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw PawbotBackendError.notRunning
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw PawbotBackendError.notRunning
+        }
+        if http.statusCode == 501 || http.statusCode == 503 {
+            throw PawbotBackendError.gmailNotConfigured
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw PawbotBackendError.badResponse(http.statusCode, body)
+        }
+        return try JSONDecoder().decode([PawbotGmailMessage].self, from: data)
     }
 }
 
