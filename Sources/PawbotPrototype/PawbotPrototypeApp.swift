@@ -194,9 +194,10 @@ final class PawbotModel: ObservableObject {
         }
 
         Task { @MainActor in
+            let context = await Self.gatherEphemeralContext(for: trimmed)
             let reply: String
             do {
-                reply = try await PawbotAI.shared.reply(to: trimmed)
+                reply = try await PawbotAI.shared.reply(to: trimmed, ephemeralContext: context)
             } catch {
                 let detail = (error as? LocalizedError)?.errorDescription ?? "\(error)"
                 NSLog("[Pawbot] AI error: %@", detail)
@@ -207,6 +208,55 @@ final class PawbotModel: ObservableObject {
                 messages.append(PawbotMessage(text: reply, isUser: false))
             }
         }
+    }
+
+    private static func gatherEphemeralContext(for text: String) async -> String? {
+        var blocks: [String] = []
+        if looksLikeCalendarRequest(text) {
+            if let events = try? await PawbotBackend.shared.upcomingEvents(limit: 10), !events.isEmpty {
+                let lines = events.prefix(10).map { e -> String in
+                    let when = e.start ?? "Time unknown"
+                    let where_ = e.location.flatMap { $0.isEmpty ? nil : " at \($0)" } ?? ""
+                    return "- \(e.title) (\(when))\(where_)"
+                }.joined(separator: "\n")
+                blocks.append("Upcoming calendar events from the user's Google Calendar:\n\(lines)")
+            }
+        }
+        if looksLikeEmailRequest(text) {
+            if let emails = try? await PawbotBackend.shared.recentGmail(limit: 8), !emails.isEmpty {
+                let lines = emails.prefix(8).map { e in
+                    "- From \(e.from): \(e.subject)\n  Preview: \(e.snippet.prefix(180))"
+                }.joined(separator: "\n")
+                blocks.append("Recent emails from the user's Gmail:\n\(lines)")
+            }
+        }
+        if looksLikeTextRequest(text) {
+            if let texts = try? await PawbotMessagesAPI.shared.recentMessages(limit: 8), !texts.isEmpty {
+                let lines = texts.map { m in
+                    "- \(m.prettySender) (\(m.relativeTime)): \(m.text)"
+                }.joined(separator: "\n")
+                blocks.append("Recent iMessages from the user's Messages app:\n\(lines)")
+            }
+        }
+        return blocks.isEmpty ? nil : blocks.joined(separator: "\n\n")
+    }
+
+    private static func looksLikeCalendarRequest(_ text: String) -> Bool {
+        let t = text.lowercased()
+        let phrases = ["calendar", "event", "events", "upcoming", "appointment", "appointments", "meeting", "meetings", "schedule", "what do i have", "what's on my", "whats on my", "today's plans", "todays plans", "next event", "what's next", "whats next"]
+        return phrases.contains { t.contains($0) }
+    }
+
+    private static func looksLikeEmailRequest(_ text: String) -> Bool {
+        let t = text.lowercased()
+        let phrases = ["email", "emails", "inbox", "mail", "gmail", "from gmail", "any mail"]
+        return phrases.contains { t.contains($0) }
+    }
+
+    private static func looksLikeTextRequest(_ text: String) -> Bool {
+        let t = text.lowercased()
+        let phrases = ["text from", "text said", "imessage", "messages app", "any new text", "any texts", "recent text", "latest text", "did i get a text"]
+        return phrases.contains { t.contains($0) }
     }
 
     private static func looksLikeScreenshotRequest(_ text: String) -> Bool {
@@ -1338,11 +1388,15 @@ actor PawbotAI {
 
     var isConfigured: Bool { apiKey != nil }
 
-    func reply(to userText: String) async throws -> String {
+    func reply(to userText: String, ephemeralContext: String? = nil) async throws -> String {
         guard let apiKey else { throw PawbotAIError.missingKey }
 
         history.append(["role": "user", "content": userText])
-        let messages: [[String: String]] = [["role": "system", "content": systemPrompt]] + history.suffix(20)
+        var messages: [[String: String]] = [["role": "system", "content": systemPrompt]]
+        if let ephemeralContext, !ephemeralContext.isEmpty {
+            messages.append(["role": "system", "content": "Live data the user just asked about (use this to answer specifically — don't say you can't see it):\n\n\(ephemeralContext)"])
+        }
+        messages.append(contentsOf: history.suffix(20))
 
         var lastError: Error = PawbotAIError.noContent
         let order = (cachedTextModel.map { [$0] } ?? []) + textModelCandidates.filter { $0 != cachedTextModel }
