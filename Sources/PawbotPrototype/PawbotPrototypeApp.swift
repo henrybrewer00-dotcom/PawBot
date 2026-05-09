@@ -132,6 +132,11 @@ final class PawbotModel: ObservableObject {
             isPawbotThinking = true
         }
 
+        if Self.looksLikeScreenshotRequest(trimmed) {
+            lookAtScreen(prompt: trimmed)
+            return
+        }
+
         Task { @MainActor in
             let reply: String
             do {
@@ -146,6 +151,16 @@ final class PawbotModel: ObservableObject {
                 messages.append(PawbotMessage(text: reply, isUser: false))
             }
         }
+    }
+
+    private static func looksLikeScreenshotRequest(_ text: String) -> Bool {
+        let t = text.lowercased()
+        let phrases = [
+            "screen", "screenshot", "what do you see", "look at my", "look at this",
+            "what's on my", "whats on my", "what is on my", "read my screen",
+            "read this", "see my", "see what", "see this", "show me what", "tell me what's"
+        ]
+        return phrases.contains { t.contains($0) }
     }
 
 
@@ -210,28 +225,46 @@ final class PawbotModel: ObservableObject {
         }
     }
 
-    func lookAtScreen() {
+    func lookAtScreen(prompt customPrompt: String? = nil) {
         if !hasStartedConversation {
             withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
         }
-        appendBot("One moment — let me take a look at your screen.")
-        isPawbotThinking = true
+        if !isPawbotThinking { isPawbotThinking = true }
+
+        let basePrompt = "I'm helping an older adult use their computer. In 2-3 short, friendly sentences, plainly describe what's on their screen and what they might want help with. No jargon."
+        let prompt: String
+        if let customPrompt, !customPrompt.isEmpty {
+            prompt = "\(basePrompt)\n\nThey just asked: \"\(customPrompt)\". Answer that specifically based on what's on the screen."
+        } else {
+            prompt = basePrompt
+        }
 
         Task { @MainActor in
             let result: String
-            do {
-                guard let image = await PawbotScreenCapture.capture() else {
-                    throw PawbotAIError.noContent
+            switch await PawbotScreenCapture.captureWithPermission() {
+            case .denied:
+                result = "I need your permission to see the screen. macOS just opened (or will open) the Privacy & Security panel — turn on Pawbot under Screen Recording, then ask me again."
+            case .failed(let reason):
+                result = "I couldn't grab the screen — \(reason)"
+            case .image(let image):
+                do {
+                    result = try await PawbotAI.shared.describe(image: image, prompt: prompt)
+                } catch PawbotAIError.missingKey {
+                    result = "I'd love to look, but I'm missing my AI key."
+                } catch {
+                    let detail = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+                    result = "(Grok vision error — \(detail))"
                 }
-                result = try await PawbotAI.shared.describe(image: image, prompt: "I'm helping an older adult use their computer. In 2-3 short, friendly sentences, plainly describe what's on their screen and what they might want help with. No jargon.")
-            } catch PawbotAIError.missingKey {
-                result = "I'd love to look, but I'm missing my AI key. Add one in settings and I'll try again."
-            } catch {
-                result = "I couldn't see the screen this time. macOS may need permission first — open System Settings → Privacy & Security → Screen Recording and turn on Pawbot, then try again."
             }
             withAnimation(.easeInOut(duration: 0.55)) {
                 isPawbotThinking = false
                 messages.append(PawbotMessage(text: result, isUser: false))
+            }
+            if let customPrompt, customPrompt.lowercased().contains("read") {
+                speech.speak(result) { [weak self] in
+                    Task { @MainActor in self?.isSpeaking = false }
+                }
+                isSpeaking = true
             }
         }
     }
@@ -839,8 +872,10 @@ actor PawbotAI {
     private let session: URLSession
     private let apiKey: String?
     private let endpoint = URL(string: "https://api.x.ai/v1/chat/completions")!
-    private let textModelCandidates = ["grok-3-latest", "grok-3", "grok-2-latest", "grok-beta"]
-    private let visionModelCandidates = ["grok-3-vision-latest", "grok-2-vision-latest", "grok-2-vision-1212"]
+    private let textModelCandidates = ["grok-2-latest", "grok-3-latest", "grok-3", "grok-beta"]
+    private let visionModelCandidates = ["grok-2-vision-latest", "grok-3-vision-latest", "grok-2-vision-1212"]
+    private var cachedTextModel: String?
+    private var cachedVisionModel: String?
     private let systemPrompt = """
     You are Pawbot, a calm and patient assistant designed to help older adults \
     with what's on their computer screen. Speak gently. Use short sentences and \
@@ -880,9 +915,11 @@ actor PawbotAI {
         let messages: [[String: String]] = [["role": "system", "content": systemPrompt]] + history.suffix(20)
 
         var lastError: Error = PawbotAIError.noContent
-        for model in textModelCandidates {
+        let order = (cachedTextModel.map { [$0] } ?? []) + textModelCandidates.filter { $0 != cachedTextModel }
+        for model in order {
             do {
                 let trimmed = try await postChat(apiKey: apiKey, model: model, messages: messages, temperature: 0.5)
+                cachedTextModel = model
                 history.append(["role": "assistant", "content": trimmed])
                 return trimmed
             } catch {
@@ -948,9 +985,12 @@ actor PawbotAI {
         ]
 
         var lastError: Error = PawbotAIError.noContent
-        for model in visionModelCandidates {
+        let order = (cachedVisionModel.map { [$0] } ?? []) + visionModelCandidates.filter { $0 != cachedVisionModel }
+        for model in order {
             do {
-                return try await postChat(apiKey: apiKey, model: model, messages: messages, temperature: 0.4)
+                let result = try await postChat(apiKey: apiKey, model: model, messages: messages, temperature: 0.4)
+                cachedVisionModel = model
+                return result
             } catch {
                 lastError = error
                 if case PawbotAIError.badResponse(let code, _) = error, code != 404 && code != 400 { break }
@@ -1001,13 +1041,30 @@ private final class SpeechFinishObserver: NSObject, AVSpeechSynthesizerDelegate,
     }
 }
 
+enum PawbotScreenCaptureResult {
+    case image(NSImage)
+    case denied
+    case failed(String)
+}
+
 enum PawbotScreenCapture {
     @MainActor
-    static func capture() async -> NSImage? {
-        guard let displayID = NSScreen.main?.displayID else { return nil }
-        guard let cgImage = CGDisplayCreateImage(displayID) else { return nil }
+    static func captureWithPermission() async -> PawbotScreenCaptureResult {
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()
+            try? await Task.sleep(for: .milliseconds(400))
+            if !CGPreflightScreenCaptureAccess() {
+                return .denied
+            }
+        }
+        guard let displayID = NSScreen.main?.displayID else {
+            return .failed("no main display")
+        }
+        guard let cgImage = CGDisplayCreateImage(displayID) else {
+            return .failed("CGDisplayCreateImage returned nil — permission may be needed")
+        }
         let size = NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
-        return NSImage(cgImage: cgImage, size: size)
+        return .image(NSImage(cgImage: cgImage, size: size))
     }
 }
 
