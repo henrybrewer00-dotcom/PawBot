@@ -1,73 +1,75 @@
-// Pawbot Browser — agent service worker.
-// Runs a tool-call loop with xAI Grok, executing browser actions via chrome APIs.
+// Pawbot Browser — vision-driven agent service worker.
+// Every turn: take a screenshot, hand it to Grok vision, Grok picks a tool,
+// we execute it (mostly via x,y coordinate-based clicks like Claude Computer
+// Use), then loop with a fresh screenshot. No CSS selectors required.
 
-const SYSTEM_PROMPT = `You are Pawbot Browser, an AI agent driving a Chrome browser for an OLDER ADULT (65–90 years old). They asked you to do a task in plain words. Your job is to complete it step by step using the browser tools.
+const SYSTEM_PROMPT = `You are Pawbot Browser, an AI agent driving a Chrome browser for an OLDER ADULT (65–90 years old).
+
+You SEE screenshots of the visible browser tab on every turn. Each user turn after the first contains the latest screenshot and the viewport size in CSS pixels.
+
+You DRIVE the browser through tools that take pixel coordinates:
+- click(x, y) — clicks at (x, y) in CSS pixels of the viewport in the screenshot.
+- type(text, submit) — types into whatever field is currently focused (click first if needed).
+- key_press(key) — presses Enter, Tab, Escape, ArrowDown, etc.
+- scroll(direction, amount) — scrolls up / down / top / bottom.
+- navigate(url) — go to a URL.
+- wait(seconds) — for slow pages.
+- get_latest_email_code(from_contains) — opens Gmail in a new tab to grab a 4-8 digit code.
+- read_page() — fallback: visible text dump if a screenshot is too dense.
+- done(answer) — finish the task with a plain-language message to the user.
 
 HARD RULES:
-- The user is not technical. Do NOT explain what you're doing in jargon. Don't return raw HTML or selectors to them.
-- Be careful and patient. Take one step, observe, then take the next.
-- ALWAYS call read_page or screenshot after navigating or clicking, so you know what's actually on screen now. Don't guess.
-- For sign-up / login flows: only use the user's real info if they provided it. If you need their email, password, or personal info that wasn't given, stop and ask via the done() tool.
-- If a verification code is needed, use get_latest_email_code to find it from Gmail.
-- When the task is finished (or you need user input), call the done() tool with a short, plain-language message — never with HTML or selectors.
-- Never enter the user's password unless they explicitly typed it in the request.
-- If you hit something risky (payment confirmation, "are you sure?" final step), stop and call done() asking for confirmation.
-
-Use the tools below. Keep going until the task is done or you need the user.`;
+1. Look at the screenshot before deciding. Don't guess where things are.
+2. Coordinates are CSS pixels of the visible viewport (top-left is 0,0). The viewport size is given in each turn — never click outside it.
+3. Click the CENTER of the element, not the edge.
+4. After every click that may change the page (links, submit buttons), expect to see a new screenshot next turn — wait or scroll if you don't.
+5. The user is not technical. Never write jargon back to them. Don't say "selector" or "DOM" or pixel numbers — just say what you did.
+6. Don't enter passwords, payment info, or personal data unless the user typed it in the request. Stop and ask via done() if anything is missing.
+7. Risky steps (final purchase confirmation, account deletion, "are you sure?") → stop and ask the user via done().
+8. If a verification code is needed, use get_latest_email_code rather than guessing.
+9. When the task is finished or you need user input, call done(answer) — and answer in plain warm words.`;
 
 const TOOLS = [
   {
     type: "function",
     function: {
-      name: "navigate",
-      description: "Navigate the active tab to a URL. Use full URLs including https://.",
-      parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] }
-    }
-  },
-  {
-    type: "function",
-    function: {
       name: "click",
-      description: "Click an element. Provide either a CSS selector OR visible text (one of them). Visible text is preferred when possible.",
+      description: "Click at the given x,y in CSS pixels of the visible viewport. The viewport size is given each turn.",
       parameters: {
         type: "object",
         properties: {
-          selector: { type: "string", description: "CSS selector" },
-          text: { type: "string", description: "Visible text on the element to click (e.g., 'Sign In')" }
-        }
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "type_text",
-      description: "Type text into an input or textarea. Provide the CSS selector and the text to type. Will dispatch input events so frameworks pick it up.",
-      parameters: {
-        type: "object",
-        properties: {
-          selector: { type: "string" },
-          text: { type: "string" },
-          submit: { type: "boolean", description: "If true, press Enter after typing" }
+          x: { type: "number", description: "X coordinate in CSS pixels" },
+          y: { type: "number", description: "Y coordinate in CSS pixels" }
         },
-        required: ["selector", "text"]
+        required: ["x", "y"]
       }
     }
   },
   {
     type: "function",
     function: {
-      name: "read_page",
-      description: "Get the visible text and a list of interactable elements (buttons, inputs, links) of the current tab. Use this to understand what's on screen.",
-      parameters: { type: "object", properties: {} }
+      name: "type",
+      description: "Type text into the currently focused field. Click into the field first if it isn't focused.",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string" },
+          submit: { type: "boolean", description: "Press Enter after typing" }
+        },
+        required: ["text"]
+      }
     }
   },
   {
     type: "function",
     function: {
-      name: "screenshot",
-      description: "Take a screenshot of the current visible tab and return it for vision analysis. Use only when read_page text isn't enough (e.g., when the page is mostly images or a captcha appears).",
-      parameters: { type: "object", properties: {} }
+      name: "key_press",
+      description: "Press a special key — Enter, Tab, Escape, Backspace, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, PageDown, PageUp.",
+      parameters: {
+        type: "object",
+        properties: { key: { type: "string" } },
+        required: ["key"]
+      }
     }
   },
   {
@@ -75,14 +77,29 @@ const TOOLS = [
     function: {
       name: "scroll",
       description: "Scroll the page.",
-      parameters: { type: "object", properties: { direction: { type: "string", enum: ["up", "down", "top", "bottom"] } }, required: ["direction"] }
+      parameters: {
+        type: "object",
+        properties: {
+          direction: { type: "string", enum: ["up", "down", "top", "bottom"] },
+          amount: { type: "number", description: "Fraction of viewport to scroll (default 0.8)" }
+        },
+        required: ["direction"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "navigate",
+      description: "Navigate the active tab to a URL. Include the full URL with https://.",
+      parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] }
     }
   },
   {
     type: "function",
     function: {
       name: "wait",
-      description: "Wait for a number of seconds (useful after navigation or form submit).",
+      description: "Wait for some seconds.",
       parameters: { type: "object", properties: { seconds: { type: "number" } }, required: ["seconds"] }
     }
   },
@@ -90,23 +107,37 @@ const TOOLS = [
     type: "function",
     function: {
       name: "get_latest_email_code",
-      description: "Open Gmail in a new tab and find the latest 4-8 digit verification code from a sender matching the keyword. Returns the code as a string (or empty if none found).",
-      parameters: { type: "object", properties: { from_contains: { type: "string" } }, required: ["from_contains"] }
+      description: "Open Gmail and find the latest 4-8 digit verification code from a sender keyword. Returns the code as text. User must already be signed into Gmail.",
+      parameters: {
+        type: "object",
+        properties: { from_contains: { type: "string" } },
+        required: ["from_contains"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_page",
+      description: "Fallback: dump visible page text if a screenshot is hard to read. Don't use this for normal interaction.",
+      parameters: { type: "object", properties: {} }
     }
   },
   {
     type: "function",
     function: {
       name: "done",
-      description: "Signal the task is complete OR ask the user for input. Provide a short plain-language message. The user is an older adult — no jargon.",
+      description: "Finish — send a short, plain-language message to the user. Use this whenever the task is done OR you need user input (e.g. password).",
       parameters: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] }
     }
   }
 ];
 
-const TEXT_MODEL_FALLBACKS = ["grok-4-fast-non-reasoning", "grok-4-0709", "grok-3", "grok-3-mini"];
 const VISION_MODEL = "grok-4-0709";
-const MAX_ITERATIONS = 25;
+const FALLBACK_MODELS = ["grok-4-fast-non-reasoning", "grok-4-0709"];
+const MAX_ITERATIONS = 30;
+const SCREENSHOT_MAX_WIDTH = 1280;
+const SCREENSHOTS_TO_KEEP = 2; // images cost tokens, prune older ones
 
 let activeRun = null;
 
@@ -132,15 +163,28 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
+// =============================
+// Agent loop
+// =============================
 async function runAgent(task, port, isStopped) {
   const { xaiKey } = await chrome.storage.local.get(["xaiKey"]);
   if (!xaiKey) throw new Error("Missing xAI key. Open Settings.");
 
-  port.postMessage({ type: "status", text: "Thinking…" });
+  port.postMessage({ type: "status", text: "Looking at your browser…" });
+
+  await sleep(400);
+  const firstSnap = await snapshot();
 
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: task }
+    { role: "user", content: task },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: `Here is the current browser. URL: ${firstSnap.url}\nViewport: ${firstSnap.width}x${firstSnap.height} CSS pixels.` },
+        { type: "image_url", image_url: { url: firstSnap.dataUrl } }
+      ]
+    }
   ];
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -149,6 +193,7 @@ async function runAgent(task, port, isStopped) {
       return;
     }
 
+    port.postMessage({ type: "status", text: "Thinking…" });
     const response = await callGrok(xaiKey, messages, TOOLS);
 
     if (!response.toolCalls?.length) {
@@ -167,6 +212,8 @@ async function runAgent(task, port, isStopped) {
       }))
     });
 
+    let earlyExit = false;
+    let exitMessage = "";
     for (const call of response.toolCalls) {
       if (isStopped()) {
         port.postMessage({ type: "error", text: "Stopped by user." });
@@ -186,63 +233,127 @@ async function runAgent(task, port, isStopped) {
       messages.push({ role: "tool", tool_call_id: call.id, content: truncated });
 
       if (call.name === "done") {
-        port.postMessage({ type: "done", text: args.answer || "Done." });
-        return;
+        earlyExit = true;
+        exitMessage = args.answer || "Done.";
+        break;
       }
       port.postMessage({ type: "result", text: shortPreview(truncated) });
     }
+
+    if (earlyExit) {
+      port.postMessage({ type: "done", text: exitMessage });
+      return;
+    }
+
+    // After all the tool calls, take a fresh screenshot and add it as the
+    // next user turn. Prune older images first to keep token cost in check.
+    pruneOldScreenshots(messages, SCREENSHOTS_TO_KEEP);
+    await sleep(400);
+    const fresh = await snapshot();
+    messages.push({
+      role: "user",
+      content: [
+        { type: "text", text: `Updated screen. URL: ${fresh.url}\nViewport: ${fresh.width}x${fresh.height} CSS pixels.` },
+        { type: "image_url", image_url: { url: fresh.dataUrl } }
+      ]
+    });
   }
   port.postMessage({ type: "error", text: "Pawbot ran out of steps. Try a smaller request." });
 }
 
-function safeJSONParse(s) {
-  try { return JSON.parse(s); } catch { return null; }
-}
-
-function humanizeAction(name, args) {
-  switch (name) {
-    case "navigate": return `Going to ${args.url}`;
-    case "click": return `Clicking ${args.text || args.selector || "something"}`;
-    case "type_text": return `Typing "${(args.text || "").slice(0, 40)}…"`;
-    case "read_page": return "Reading the page";
-    case "screenshot": return "Taking a screenshot";
-    case "scroll": return `Scrolling ${args.direction || "down"}`;
-    case "wait": return `Waiting ${args.seconds || 1}s`;
-    case "get_latest_email_code": return `Getting code from ${args.from_contains}…`;
-    case "done": return "Wrapping up";
-    default: return name;
+function pruneOldScreenshots(messages, keep) {
+  // Walk backwards through messages, keep last `keep` user messages with
+  // image_url content; replace earlier images with a text breadcrumb.
+  let kept = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "user" || !Array.isArray(m.content)) continue;
+    const hasImage = m.content.some((c) => c?.type === "image_url");
+    if (!hasImage) continue;
+    if (kept < keep) {
+      kept++;
+      continue;
+    }
+    // Strip image, keep the text breadcrumb.
+    m.content = m.content
+      .filter((c) => c?.type !== "image_url")
+      .concat([{ type: "text", text: "(earlier screenshot omitted to save tokens)" }]);
   }
 }
 
-function shortPreview(s) {
-  const oneLine = s.replace(/\s+/g, " ");
-  return oneLine.length > 200 ? oneLine.slice(0, 197) + "…" : oneLine;
+// =============================
+// Snapshot (capture + dims)
+// =============================
+async function getActiveTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) throw new Error("No active tab");
+  return tab;
+}
+
+async function snapshot() {
+  const tab = await getActiveTab();
+  const [{ result: vp }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: () => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+      dpr: window.devicePixelRatio,
+      url: location.href,
+      title: document.title
+    })
+  });
+  let dataUrl;
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
+  } catch (err) {
+    // captureVisibleTab fails on internal pages; return a tiny placeholder
+    dataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  }
+  // Downscale to keep token cost manageable.
+  try {
+    dataUrl = await downscale(dataUrl, SCREENSHOT_MAX_WIDTH);
+  } catch {}
+  return { ...vp, dataUrl, tabId: tab.id };
+}
+
+async function downscale(dataUrl, maxWidth) {
+  const blob = await (await fetch(dataUrl)).blob();
+  const bitmap = await createImageBitmap(blob);
+  if (bitmap.width <= maxWidth) return dataUrl;
+  const scale = maxWidth / bitmap.width;
+  const w = Math.round(bitmap.width * scale);
+  const h = Math.round(bitmap.height * scale);
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  const out = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.7 });
+  const buf = new Uint8Array(await out.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+  return "data:image/jpeg;base64," + btoa(bin);
 }
 
 // =============================
 // Grok call
 // =============================
-async function callGrok(apiKey, messages, tools, useVision = false) {
-  const candidates = useVision ? [VISION_MODEL, "grok-4-fast-non-reasoning"] : TEXT_MODEL_FALLBACKS;
+async function callGrok(apiKey, messages, tools) {
   let lastError = null;
-  for (const model of candidates) {
+  // Vision-capable model first; fallbacks for text-only paths.
+  for (const model of FALLBACK_MODELS) {
     try {
       const body = {
         model,
         messages,
-        temperature: 0.3,
+        temperature: 0.2,
         max_tokens: 800
       };
-      if (tools && tools.length) {
+      if (tools?.length) {
         body.tools = tools;
         body.tool_choice = "auto";
       }
       const res = await fetch("https://api.x.ai/v1/chat/completions", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify(body)
       });
       if (!res.ok) {
@@ -268,28 +379,135 @@ async function callGrok(apiKey, messages, tools, useVision = false) {
 // =============================
 // Tool execution
 // =============================
-async function getActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) throw new Error("No active tab");
-  return tab;
-}
-
 async function executeTool(name, args, xaiKey) {
   switch (name) {
+    case "click": return await toolClick(args.x, args.y);
+    case "type": return await toolType(args.text, args.submit === true);
+    case "key_press": return await toolKeyPress(args.key);
+    case "scroll": return await toolScroll(args.direction || "down", args.amount ?? 0.8);
     case "navigate": return await toolNavigate(args.url);
-    case "click": return await toolClick(args);
-    case "type_text": return await toolTypeText(args);
-    case "read_page": return await toolReadPage();
-    case "screenshot": return await toolScreenshot(xaiKey);
-    case "scroll": return await toolScroll(args.direction || "down");
-    case "wait": return await sleep((args.seconds || 1) * 1000), `Waited ${args.seconds || 1}s.`;
+    case "wait": await sleep((args.seconds || 1) * 1000); return `Waited ${args.seconds || 1}s.`;
     case "get_latest_email_code": return await toolGetEmailCode(args.from_contains || "");
+    case "read_page": return await toolReadPage();
     case "done": return args.answer || "Done.";
     default: return `Unknown tool: ${name}`;
   }
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function safeJSONParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+function humanizeAction(name, args) {
+  switch (name) {
+    case "click": return `Clicking at (${Math.round(args.x)}, ${Math.round(args.y)})`;
+    case "type": return `Typing "${(args.text || "").slice(0, 40)}${args.submit ? " ⏎" : ""}"`;
+    case "key_press": return `Pressing ${args.key}`;
+    case "scroll": return `Scrolling ${args.direction}`;
+    case "navigate": return `Going to ${args.url}`;
+    case "wait": return `Waiting ${args.seconds}s`;
+    case "get_latest_email_code": return `Looking up code from ${args.from_contains}…`;
+    case "read_page": return "Reading page text";
+    case "done": return "Wrapping up";
+    default: return name;
+  }
+}
+
+function shortPreview(s) {
+  const oneLine = s.replace(/\s+/g, " ");
+  return oneLine.length > 200 ? oneLine.slice(0, 197) + "…" : oneLine;
+}
+
+async function toolClick(x, y) {
+  const tab = await getActiveTab();
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (px, py) => {
+      const el = document.elementFromPoint(px, py);
+      if (!el) return { ok: false, error: `No element at (${px}, ${py})` };
+      el.scrollIntoView({ block: "center", behavior: "instant" });
+      const tag = el.tagName.toLowerCase();
+      const label = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim().slice(0, 80);
+      // Focus inputs so subsequent type() lands here
+      if (typeof el.focus === "function") el.focus();
+      el.click();
+      return { ok: true, tag, label };
+    },
+    args: [x, y]
+  });
+  await sleep(700);
+  if (!result?.ok) return result?.error ?? "Click missed.";
+  return `Clicked <${result.tag}> "${result.label}".`;
+}
+
+async function toolType(text, submit) {
+  const tab = await getActiveTab();
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (value, doSubmit) => {
+      const el = document.activeElement;
+      if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)) {
+        return { ok: false, error: "No focused input. Click into the field first." };
+      }
+      if (el.isContentEditable) {
+        el.textContent = value;
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, data: value }));
+      } else {
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+        if (setter) setter.call(el, value); else el.value = value;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (doSubmit) {
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+        if (!el.isContentEditable && el.form) el.form.requestSubmit?.();
+      }
+      return { ok: true };
+    },
+    args: [text, !!submit]
+  });
+  await sleep(300);
+  if (!result?.ok) return result?.error ?? "Type failed.";
+  return `Typed (${text.length} chars)${submit ? " and pressed Enter" : ""}.`;
+}
+
+async function toolKeyPress(key) {
+  const tab = await getActiveTab();
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (k) => {
+      const el = document.activeElement || document.body;
+      const opts = { key: k, bubbles: true };
+      el.dispatchEvent(new KeyboardEvent("keydown", opts));
+      el.dispatchEvent(new KeyboardEvent("keypress", opts));
+      el.dispatchEvent(new KeyboardEvent("keyup", opts));
+    },
+    args: [key]
+  });
+  await sleep(250);
+  return `Pressed ${key}.`;
+}
+
+async function toolScroll(direction, amount) {
+  const tab = await getActiveTab();
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (dir, amt) => {
+      const px = window.innerHeight * amt;
+      switch (dir) {
+        case "up": window.scrollBy({ top: -px, behavior: "smooth" }); break;
+        case "top": window.scrollTo({ top: 0, behavior: "smooth" }); break;
+        case "bottom": window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); break;
+        default: window.scrollBy({ top: px, behavior: "smooth" });
+      }
+    },
+    args: [direction, amount]
+  });
+  await sleep(500);
+  return `Scrolled ${direction}.`;
+}
 
 async function toolNavigate(url) {
   if (!/^https?:\/\//i.test(url)) url = "https://" + url;
@@ -299,7 +517,7 @@ async function toolNavigate(url) {
   return `Navigated to ${url}.`;
 }
 
-function waitForLoad(tabId, timeoutMs = 12000) {
+function waitForLoad(tabId, timeoutMs = 15000) {
   return new Promise((resolve) => {
     const start = Date.now();
     const check = async () => {
@@ -314,142 +532,21 @@ function waitForLoad(tabId, timeoutMs = 12000) {
   });
 }
 
-async function toolClick({ selector, text }) {
-  const tab = await getActiveTab();
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: (sel, txt) => {
-      const findByText = (t) => {
-        const tl = t.toLowerCase();
-        const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='submit'], input[type='button'], label"));
-        return candidates.find((el) => (el.innerText || el.value || "").trim().toLowerCase().includes(tl));
-      };
-      let target = null;
-      if (sel) {
-        try { target = document.querySelector(sel); } catch {}
-      }
-      if (!target && txt) target = findByText(txt);
-      if (!target) return { ok: false, error: "Element not found" };
-      target.scrollIntoView({ behavior: "instant", block: "center" });
-      target.click();
-      return { ok: true, tag: target.tagName };
-    },
-    args: [selector || null, text || null]
-  });
-  if (!result?.ok) return `Could not click — ${result?.error ?? "no element"}.`;
-  await sleep(700);
-  return `Clicked ${result.tag}.`;
-}
-
-async function toolTypeText({ selector, text, submit }) {
-  const tab = await getActiveTab();
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: (sel, value, doSubmit) => {
-      const el = document.querySelector(sel);
-      if (!el) return { ok: false, error: "Input not found" };
-      el.focus();
-      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-      if (setter) setter.call(el, value); else el.value = value;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      if (doSubmit) {
-        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-        if (el.form) el.form.submit?.();
-      }
-      return { ok: true };
-    },
-    args: [selector, text, !!submit]
-  });
-  if (!result?.ok) return `Could not type — ${result?.error ?? "no input"}.`;
-  await sleep(300);
-  return `Typed into ${selector}.`;
-}
-
 async function toolReadPage() {
   const tab = await getActiveTab();
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    func: () => {
-      const visText = (document.body?.innerText || "").slice(0, 5000);
-      const interactables = [];
-      const seen = new Set();
-      document.querySelectorAll("a, button, input, textarea, select, [role='button']").forEach((el) => {
-        const rect = el.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return;
-        const tag = el.tagName.toLowerCase();
-        const label = (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || "").trim().slice(0, 80);
-        const id = el.id || "";
-        const name = el.name || "";
-        const type = el.type || "";
-        const sigKey = `${tag}|${label}|${id}|${name}`;
-        if (seen.has(sigKey)) return;
-        seen.add(sigKey);
-        let selector = "";
-        if (id) selector = `#${CSS.escape(id)}`;
-        else if (name) selector = `${tag}[name="${name}"]`;
-        else if (type) selector = `${tag}[type="${type}"]`;
-        else selector = tag;
-        interactables.push({ tag, label, selector, type });
-      });
-      return {
-        url: location.href,
-        title: document.title,
-        text: visText,
-        interactables: interactables.slice(0, 60)
-      };
-    }
+    func: () => ({
+      url: location.href,
+      title: document.title,
+      text: (document.body?.innerText || "").slice(0, 6000)
+    })
   });
   if (!result) return "Could not read the page.";
-  const lines = [
-    `URL: ${result.url}`,
-    `Title: ${result.title}`,
-    `Visible text:\n${result.text.slice(0, 2500)}`,
-    `Interactables:`,
-    ...result.interactables.map((el, i) => `${i + 1}. <${el.tag}${el.type ? ` type=${el.type}` : ""}> "${el.label}" → ${el.selector}`)
-  ];
-  return lines.join("\n");
-}
-
-async function toolScreenshot(xaiKey) {
-  const tab = await getActiveTab();
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
-  // Ask vision model what's on it
-  const messages = [
-    { role: "system", content: "You are describing a screenshot for an older adult. 2-3 short, plain sentences." },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: "What's on this screen, and what stands out for the next step?" },
-        { type: "image_url", image_url: { url: dataUrl } }
-      ]
-    }
-  ];
-  const resp = await callGrok(xaiKey, messages, [], true);
-  return resp.content || "Captured screen but couldn't describe it.";
-}
-
-async function toolScroll(direction) {
-  const tab = await getActiveTab();
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: (dir) => {
-      switch (dir) {
-        case "up": window.scrollBy({ top: -window.innerHeight * 0.8, behavior: "smooth" }); break;
-        case "top": window.scrollTo({ top: 0, behavior: "smooth" }); break;
-        case "bottom": window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); break;
-        default: window.scrollBy({ top: window.innerHeight * 0.8, behavior: "smooth" });
-      }
-    },
-    args: [direction]
-  });
-  await sleep(500);
-  return `Scrolled ${direction}.`;
+  return `URL: ${result.url}\nTitle: ${result.title}\n\n${result.text}`;
 }
 
 async function toolGetEmailCode(fromContains) {
-  // Open Gmail in a new tab, find latest matching email, extract a 4-8 digit code.
   const original = await getActiveTab();
   const newTab = await chrome.tabs.create({ url: "https://mail.google.com/mail/u/0/#inbox", active: false });
   await waitForLoad(newTab.id, 15000);
@@ -459,7 +556,7 @@ async function toolGetEmailCode(fromContains) {
     func: (needle) => {
       const rows = Array.from(document.querySelectorAll("tr.zA, div.zA"));
       const hit = rows.find((r) => (r.innerText || "").toLowerCase().includes(needle.toLowerCase()));
-      if (!hit) return { ok: false, error: "No matching email row found" };
+      if (!hit) return { ok: false, error: "No matching email" };
       hit.click();
       return { ok: true };
     },
@@ -467,7 +564,7 @@ async function toolGetEmailCode(fromContains) {
   });
   if (!result?.ok) {
     chrome.tabs.remove(newTab.id);
-    return `Couldn't find an email matching "${fromContains}". Make sure you're signed into Gmail.`;
+    return `Couldn't find email matching "${fromContains}". Make sure you're signed into Gmail.`;
   }
   await sleep(2500);
   const [{ result: bodyResult }] = await chrome.scripting.executeScript({
