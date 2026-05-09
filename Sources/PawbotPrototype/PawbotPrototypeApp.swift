@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Combine
+import Speech
 import SwiftUI
 
 @main
@@ -50,6 +51,7 @@ final class PawbotModel: ObservableObject {
     @Published var isSpeaking = false
 
     private let speech = PawbotSpeech()
+    private let voice = PawbotVoiceInput()
     private var screenshotPollingTask: Task<Void, Never>?
 
     let actions = [
@@ -111,9 +113,36 @@ final class PawbotModel: ObservableObject {
         }
     }
 
-    func pulseVoice() {
-        withAnimation(.easeInOut(duration: 0.75)) {
-            isListening.toggle()
+    func toggleVoiceInput() {
+        if voice.isRecording {
+            voice.stopAndFinalize()
+            return
+        }
+        Task { @MainActor in
+            let started = await voice.start(
+                onPartial: { [weak self] text in
+                    self?.draftText = text
+                },
+                onFinal: { [weak self] text in
+                    guard let self else { return }
+                    self.draftText = text
+                    withAnimation(.easeInOut(duration: 0.45)) { self.isListening = false }
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.sendPrototypeMessage()
+                    }
+                },
+                onError: { [weak self] message in
+                    guard let self else { return }
+                    withAnimation(.easeInOut(duration: 0.45)) { self.isListening = false }
+                    self.appendBot(message)
+                }
+            )
+            if started {
+                withAnimation(.easeInOut(duration: 0.45)) { isListening = true }
+                if !hasStartedConversation {
+                    withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
+                }
+            }
         }
     }
 
@@ -634,16 +663,17 @@ struct PawbotRootView: View {
                         .stroke(Color.blue.opacity(0.35), lineWidth: 1.5)
                 )
 
-                Button(action: model.pulseVoice) {
+                Button(action: model.toggleVoiceInput) {
                     Image(systemName: model.isListening ? "waveform" : "mic.fill")
                         .font(.system(size: 23, weight: .bold))
                         .foregroundStyle(.white)
                         .frame(width: 54, height: 54)
-                        .background(model.isListening ? Color.green.opacity(0.95) : Color.blue.opacity(0.95), in: Circle())
-                        .scaleEffect(model.isListening ? 1.05 : 1)
-                        .shadow(color: (model.isListening ? Color.green : Color.blue).opacity(0.24), radius: model.isListening ? 18 : 9)
+                        .background(model.isListening ? Color.red.opacity(0.95) : Color.blue.opacity(0.95), in: Circle())
+                        .scaleEffect(model.isListening ? 1.08 : 1)
+                        .shadow(color: (model.isListening ? Color.red : Color.blue).opacity(0.32), radius: model.isListening ? 18 : 9)
                 }
                 .buttonStyle(.plain)
+                .help(model.isListening ? "Stop listening" : "Speak instead of type")
             }
         }
         .padding(18)
@@ -1131,6 +1161,102 @@ private final class SpeechFinishObserver: NSObject, AVSpeechSynthesizerDelegate,
     }
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         onFinish()
+    }
+}
+
+@MainActor
+final class PawbotVoiceInput {
+    private(set) var isRecording = false
+    private let audioEngine = AVAudioEngine()
+    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var task: SFSpeechRecognitionTask?
+    private var partialTranscript = ""
+
+    func start(
+        onPartial: @escaping (String) -> Void,
+        onFinal: @escaping (String) -> Void,
+        onError: @escaping (String) -> Void
+    ) async -> Bool {
+        let speechAuth: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation { cont in
+            SFSpeechRecognizer.requestAuthorization { status in cont.resume(returning: status) }
+        }
+        guard speechAuth == .authorized else {
+            onError("I can't use speech recognition yet. Open System Settings → Privacy & Security → Speech Recognition and turn on Pawbot, then try again.")
+            return false
+        }
+
+        let micGranted = await AVCaptureDevice.requestAccess(for: .audio)
+        guard micGranted else {
+            onError("I need permission to use the microphone. Open System Settings → Privacy & Security → Microphone and turn on Pawbot, then try again.")
+            return false
+        }
+
+        guard let recognizer, recognizer.isAvailable else {
+            onError("Speech recognition isn't available right now. Try again in a moment.")
+            return false
+        }
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        self.request = request
+
+        let inputNode = audioEngine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+        inputNode.removeTap(onBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            self?.request?.append(buffer)
+        }
+
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+        } catch {
+            onError("Couldn't start the microphone — \(error.localizedDescription)")
+            cleanup()
+            return false
+        }
+
+        partialTranscript = ""
+        task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            guard let self else { return }
+            if let result {
+                let text = result.bestTranscription.formattedString
+                Task { @MainActor in
+                    self.partialTranscript = text
+                    onPartial(text)
+                    if result.isFinal {
+                        onFinal(text)
+                        self.cleanup()
+                    }
+                }
+            }
+            if error != nil {
+                Task { @MainActor in
+                    let final = self.partialTranscript
+                    self.cleanup()
+                    onFinal(final)
+                }
+            }
+        }
+
+        isRecording = true
+        return true
+    }
+
+    func stopAndFinalize() {
+        request?.endAudio()
+    }
+
+    private func cleanup() {
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        audioEngine.inputNode.removeTap(onBus: 0)
+        task?.cancel()
+        task = nil
+        request = nil
+        isRecording = false
     }
 }
 
