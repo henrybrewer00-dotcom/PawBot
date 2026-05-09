@@ -1,7 +1,6 @@
 import AppKit
 import AVFoundation
 import Combine
-import SQLite3
 import Speech
 import SwiftUI
 import UserNotifications
@@ -60,6 +59,7 @@ final class PawbotModel: ObservableObject {
     @Published var showCalendarPopover = false
     @Published var showGmailPopover = false
     @Published var showBriefPopover = false
+    @Published var showSettingsPopover = false
     @Published var morningBriefHistory: [PawbotMorningBrief] = []
     @Published var morningBriefLoadingError: String?
     @Published var isMorningBriefLoading = false
@@ -73,9 +73,8 @@ final class PawbotModel: ObservableObject {
 
     let actions = [
         PawbotAction(title: "Explain my screen", subtitle: "See and explain it plainly", icon: "eye.fill", color: .orange),
-        PawbotAction(title: "My Messages", subtitle: "Read or reply to a text", icon: "message.fill", color: .pink),
         PawbotAction(title: "Make bigger", subtitle: "Increase screen text", icon: "textformat.size", color: .green),
-        PawbotAction(title: "Check my stuff", subtitle: "Texts + emails together", icon: "tray.full.fill", color: .indigo)
+        PawbotAction(title: "Check my stuff", subtitle: "Today's emails + calendar", icon: "tray.full.fill", color: .indigo)
     ]
 
     let notifications = [
@@ -219,43 +218,9 @@ final class PawbotModel: ObservableObject {
         }
         switch action.title {
         case "Explain my screen": lookAtScreen()
-        case "My Messages": openMessages()
         case "Make bigger": cycleFontSize()
         case "Check my stuff": checkMyStuff()
         default: break
-        }
-    }
-
-    func openMessages() {
-        if !hasStartedConversation {
-            withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
-        }
-        isPawbotThinking = true
-        Task { @MainActor in
-            do {
-                let recent = try await PawbotMessagesAPI.shared.recentMessages(limit: 8)
-                isPawbotThinking = false
-                if recent.isEmpty {
-                    appendBot("I checked your Messages but didn't find anything to read. Try sending or receiving a text first.")
-                    return
-                }
-                let summary = recent.map { msg in
-                    "• \(msg.prettySender) (\(msg.relativeTime)): \(msg.text)"
-                }.joined(separator: "\n")
-                appendBot("Here are your most recent texts:\n\n\(summary)")
-                let aiContext = "I just showed the user their most recent texts:\n\(summary)\n\nIf they ask about one of these, you already know the content. Offer to read one aloud or help draft a reply."
-                Task { await PawbotAI.shared.recordExchange(user: "[Pawbot read recent Messages from chat.db]", assistant: aiContext) }
-            } catch let error as PawbotMessagesError {
-                isPawbotThinking = false
-                appendBot(error.errorDescription ?? "I couldn't read your messages.")
-                if case .fullDiskAccessRequired = error {
-                    let url = URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles")
-                    if let url { NSWorkspace.shared.open(url) }
-                }
-            } catch {
-                isPawbotThinking = false
-                appendBot("Something went wrong reading your messages: \(error.localizedDescription)")
-            }
         }
     }
 
@@ -281,6 +246,7 @@ final class PawbotModel: ObservableObject {
     }
 
     func cycleFontSize() {
+        // Bump Pawbot's own font scale.
         let next: CGFloat
         switch fontScale {
         case ..<1.05: next = 1.25
@@ -290,10 +256,12 @@ final class PawbotModel: ObservableObject {
         withAnimation(.easeInOut(duration: 0.55)) {
             fontScale = next
         }
-        let label = next == 1.0 ? "back to normal size" : (next == 1.25 ? "a bit bigger" : "much bigger")
-        let reply = "Okay — text is \(label) now. Tap Make Bigger again to change."
+        // Also tell macOS Zoom to bump in. Requires Accessibility → Zoom enabled
+        // with the keyboard shortcut (⌥⌘=) turned on in System Settings.
+        PawbotSystemZoom.zoomIn()
+        let reply = "Made the text bigger. (If your whole screen didn't grow, turn on Accessibility → Zoom in System Settings — Pawbot just pressed Option+Command+Plus.)"
         appendBot(reply)
-        recordSyntheticExchange(user: "Make the text bigger.", assistant: reply)
+        recordSyntheticExchange(user: "Make the screen bigger.", assistant: reply)
     }
 
     func checkMyStuff() {
@@ -307,15 +275,15 @@ final class PawbotModel: ObservableObject {
             var aiContextChunks: [String] = []
 
             do {
-                let texts = try await PawbotMessagesAPI.shared.recentMessages(limit: 5)
-                if !texts.isEmpty {
-                    let lines = texts.map { "• \($0.prettySender) (\($0.relativeTime)): \($0.text)" }.joined(separator: "\n")
-                    sections.append("📱 Recent texts\n\(lines)")
-                    aiContextChunks.append("Recent iMessages:\n\(lines)")
-                }
-            } catch let error as PawbotMessagesError {
-                if case .fullDiskAccessRequired = error {
-                    sections.append("📱 Texts — I need Full Disk Access to read these. Open Privacy & Security → Full Disk Access and turn on Pawbot.")
+                let events = try await PawbotBackend.shared.upcomingEvents(limit: 5)
+                if !events.isEmpty {
+                    let lines = events.map { e -> String in
+                        let when = e.start ?? "Time unknown"
+                        let where_ = (e.location?.isEmpty == false) ? " at \(e.location!)" : ""
+                        return "• \(e.title) (\(when))\(where_)"
+                    }.joined(separator: "\n")
+                    sections.append("📅 Upcoming events\n\(lines)")
+                    aiContextChunks.append("Upcoming calendar events:\n\(lines)")
                 }
             } catch {}
 
@@ -336,7 +304,7 @@ final class PawbotModel: ObservableObject {
 
             isPawbotThinking = false
             if sections.isEmpty {
-                appendBot("I couldn't reach your texts or emails right now. Make sure Pawbot has Full Disk Access for texts, and the backend is running for email.")
+                appendBot("I couldn't reach your calendar or emails right now. Make sure the backend is running and Composio is connected.")
                 return
             }
 
@@ -344,8 +312,8 @@ final class PawbotModel: ObservableObject {
             appendBot("Here's what's new for you:\n\n\(combined)")
 
             if !aiContextChunks.isEmpty {
-                let context = "I just showed the user a 'Check my stuff' summary:\n\n\(aiContextChunks.joined(separator: "\n\n"))\n\nIf they ask about any specific item ('read Sarah's text', 'help me reply to that email'), you already know the content. Offer to read aloud or help draft a reply."
-                Task { await PawbotAI.shared.recordExchange(user: "[Pawbot pulled recent texts and emails]", assistant: context) }
+                let context = "I just showed the user a 'Check my stuff' summary:\n\n\(aiContextChunks.joined(separator: "\n\n"))\n\nIf they ask about any specific item ('read that email about the appointment'), you already know the content."
+                Task { await PawbotAI.shared.recordExchange(user: "[Pawbot pulled recent emails and calendar]", assistant: context) }
             }
         }
     }
@@ -391,7 +359,7 @@ final class PawbotModel: ObservableObject {
         Subject: \(alert.subject)
         Why I flagged it: \(alert.reason)
 
-        Don't click any links or share personal info. Tap My Messages or Check my stuff for context. Want me to help you decide what to do?
+        Don't click any links or share personal info. Want me to help you decide what to do?
         """
         appendBot(body)
         PawbotNotifier.notify(title: badge, body: "\(alert.subject) — from \(alert.from)")
@@ -484,10 +452,6 @@ final class PawbotModel: ObservableObject {
 
         var contextParts: [String] = []
 
-        if let texts = try? await PawbotMessagesAPI.shared.recentMessages(limit: 5), !texts.isEmpty {
-            let lines = texts.map { "- \($0.prettySender) (\($0.relativeTime)): \($0.text)" }.joined(separator: "\n")
-            contextParts.append("Recent texts (last 5 from chat.db):\n\(lines)")
-        }
         if let events = try? await PawbotBackend.shared.upcomingEvents(limit: 5), !events.isEmpty {
             let lines = events.map { e -> String in
                 let when = e.start ?? "Time unknown"
@@ -612,21 +576,7 @@ final class PawbotModel: ObservableObject {
         if !hasStartedConversation {
             withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
         }
-
-        if !skipConsent && !PawbotConsent.userConsentedThisSession {
-            isPawbotThinking = false
-            Task { @MainActor in
-                let approved = await PawbotConsent.askToLookAtScreen()
-                if approved {
-                    PawbotConsent.userConsentedThisSession = true
-                    self.lookAtScreen(prompt: customPrompt, skipConsent: true)
-                } else {
-                    self.appendBot("Okay — I won't look at the screen. Just say the word when you change your mind.")
-                }
-            }
-            return
-        }
-
+        _ = skipConsent
         if !isPawbotThinking { isPawbotThinking = true }
 
         let basePrompt = """
@@ -928,6 +878,21 @@ struct PawbotRootView: View {
                 .help("Back to home")
 
                 Spacer()
+
+                Button(action: { model.showSettingsPopover.toggle() }) {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.gray)
+                        .frame(width: 38, height: 38)
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Settings")
+                .popover(isPresented: $model.showSettingsPopover, arrowEdge: .bottom) {
+                    PawbotSettingsPopover(
+                        onZoomIn: { PawbotSystemZoom.zoomIn() },
+                        onZoomOut: { PawbotSystemZoom.zoomOut() }
+                    )
+                }
 
                 Button(action: model.toggleBriefPopover) {
                     Image(systemName: "sun.max.fill")
@@ -1372,7 +1337,6 @@ actor PawbotAI {
     able to see something — call the right tool first, THEN answer.
     - calendar / events / appointments / meetings / what's coming up → get_upcoming_calendar_events
     - email / inbox / mail / something from someone → get_recent_emails
-    - text / iMessage / what did mom text / SMS → get_recent_imessages
     - what's on my screen / explain this page / what app is open / read this → look_at_screen
     - morning brief / today's recap → get_morning_brief
 
@@ -1409,22 +1373,6 @@ actor PawbotAI {
                         "limit": [
                             "type": "integer",
                             "description": "Maximum emails to return (default 5)"
-                        ]
-                    ]
-                ]
-            ]
-        ],
-        [
-            "type": "function",
-            "function": [
-                "name": "get_recent_imessages",
-                "description": "Get the user's recent iMessage / SMS conversations from the Mac Messages app. Use whenever they ask about texts, what someone texted, or SMS.",
-                "parameters": [
-                    "type": "object",
-                    "properties": [
-                        "limit": [
-                            "type": "integer",
-                            "description": "Maximum texts to return (default 8)"
                         ]
                     ]
                 ]
@@ -1784,8 +1732,6 @@ actor PawbotToolExecutor {
             return await runCalendar(limit: arguments["limit"] as? Int ?? 8)
         case "get_recent_emails":
             return await runEmails(limit: arguments["limit"] as? Int ?? 5)
-        case "get_recent_imessages":
-            return await runIMessages(limit: arguments["limit"] as? Int ?? 8)
         case "look_at_screen":
             let focus = arguments["focus"] as? String
             return await runScreen(focus: focus)
@@ -1828,21 +1774,6 @@ actor PawbotToolExecutor {
         }
     }
 
-    private func runIMessages(limit: Int) async -> String {
-        do {
-            let texts = try await PawbotMessagesAPI.shared.recentMessages(limit: limit)
-            if texts.isEmpty { return "No recent texts." }
-            let lines = texts.map { m in
-                "- \(m.prettySender) (\(m.relativeTime)): \(m.text)"
-            }.joined(separator: "\n")
-            return "Recent iMessages:\n\(lines)"
-        } catch let error as PawbotMessagesError {
-            return error.errorDescription ?? "Texts unavailable."
-        } catch {
-            return "Texts unavailable: \(error.localizedDescription)"
-        }
-    }
-
     private func runMorningBrief() async -> String {
         do {
             let brief = try await PawbotBackend.shared.morningBrief(force: false)
@@ -1855,27 +1786,6 @@ actor PawbotToolExecutor {
     }
 
     private func runScreen(focus: String?) async -> String {
-        let consented = await MainActor.run { PawbotConsent.userConsentedThisSession }
-        if !consented {
-            let approved = await MainActor.run { @MainActor in
-                let alert = NSAlert()
-                alert.messageText = "Let Pawbot look at your screen?"
-                alert.informativeText = "Pawbot will take a quick screenshot of your main display to answer your question. The screenshot is sent to Grok and never saved."
-                alert.alertStyle = .informational
-                alert.addButton(withTitle: "Continue")
-                alert.addButton(withTitle: "Reject")
-                if let icon = NSImage(systemSymbolName: "eye.fill", accessibilityDescription: nil) {
-                    alert.icon = icon
-                }
-                let result = alert.runModal() == .alertFirstButtonReturn
-                if result { PawbotConsent.userConsentedThisSession = true }
-                return result
-            }
-            if !approved {
-                return "User declined to share their screen."
-            }
-        }
-
         let captured = await PawbotScreenCapture.captureWithPermission()
         switch captured {
         case .denied:
@@ -2276,134 +2186,26 @@ actor PawbotBackend {
     }
 }
 
-struct PawbotMessageRecord: Identifiable {
-    let id: Int64
-    let text: String
-    let sender: String
-    let isFromMe: Bool
-    let date: Date
-
-    var prettySender: String {
-        if isFromMe { return "You" }
-        if sender.contains("@") { return sender }
-        return sender
-    }
-
-    var relativeTime: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter.localizedString(for: date, relativeTo: Date())
-    }
-}
-
-enum PawbotMessagesError: Error, LocalizedError {
-    case cannotOpenDB
-    case fullDiskAccessRequired
-    case queryFailed(String)
-    case sendFailed(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .cannotOpenDB: return "Couldn't find the Messages database."
-        case .fullDiskAccessRequired: return "Pawbot needs Full Disk Access to read your texts. Open System Settings → Privacy & Security → Full Disk Access and turn on Pawbot."
-        case .queryFailed(let s): return "Trouble reading messages: \(s)"
-        case .sendFailed(let s): return "Couldn't send the message: \(s)"
-        }
-    }
-}
-
-actor PawbotMessagesAPI {
-    static let shared = PawbotMessagesAPI()
-
-    private let dbPath: String = {
-        NSString(string: "~/Library/Messages/chat.db").expandingTildeInPath
-    }()
-
-    func recentMessages(limit: Int = 8) throws -> [PawbotMessageRecord] {
-        guard FileManager.default.fileExists(atPath: dbPath) else {
-            throw PawbotMessagesError.cannotOpenDB
-        }
-        guard FileManager.default.isReadableFile(atPath: dbPath) else {
-            throw PawbotMessagesError.fullDiskAccessRequired
-        }
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
-            throw PawbotMessagesError.fullDiskAccessRequired
-        }
-        defer { sqlite3_close(db) }
-
-        let query = """
-            SELECT m.ROWID, m.text, h.id, m.is_from_me, m.date
-            FROM message m
-            LEFT JOIN handle h ON m.handle_id = h.ROWID
-            WHERE m.text IS NOT NULL AND length(m.text) > 0
-            ORDER BY m.date DESC
-            LIMIT \(limit);
-        """
-
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else {
-            let msg = String(cString: sqlite3_errmsg(db))
-            if msg.contains("authoriz") || msg.contains("not authorized") {
-                throw PawbotMessagesError.fullDiskAccessRequired
-            }
-            throw PawbotMessagesError.queryFailed(msg)
-        }
-        defer { sqlite3_finalize(stmt) }
-
-        var results: [PawbotMessageRecord] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let id = sqlite3_column_int64(stmt, 0)
-            let text = sqlite3_column_text(stmt, 1).flatMap { String(cString: $0) } ?? ""
-            let sender = sqlite3_column_text(stmt, 2).flatMap { String(cString: $0) } ?? "Unknown"
-            let isFromMe = sqlite3_column_int(stmt, 3) == 1
-            let appleNanos = sqlite3_column_int64(stmt, 4)
-            let secondsSinceAppleEpoch = TimeInterval(appleNanos) / 1_000_000_000
-            let date = Date(timeIntervalSinceReferenceDate: secondsSinceAppleEpoch)
-            results.append(.init(id: id, text: text, sender: sender, isFromMe: isFromMe, date: date))
-        }
-        return results
-    }
-
-    func sendMessage(to recipient: String, text: String) throws {
-        let escapedText = text
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let escapedRecipient = recipient
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let source = """
-        tell application "Messages"
-            set targetService to 1st service whose service type = iMessage
-            set targetBuddy to buddy "\(escapedRecipient)" of targetService
-            send "\(escapedText)" to targetBuddy
-        end tell
-        """
-        var error: NSDictionary?
-        let script = NSAppleScript(source: source)
-        _ = script?.executeAndReturnError(&error)
-        if let error {
-            let msg = (error[NSAppleScript.errorMessage] as? String) ?? error.description
-            throw PawbotMessagesError.sendFailed(msg)
-        }
-    }
-}
-
 enum PawbotConsent {
-    @MainActor static var userConsentedThisSession = false
+    @MainActor static var userConsentedThisSession = true
+}
+
+enum PawbotSystemZoom {
+    @MainActor
+    static func zoomIn() { sendKey(virtualKey: 24, flags: [.maskCommand, .maskAlternate]) }
 
     @MainActor
-    static func askToLookAtScreen() async -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "Let Pawbot look at your screen?"
-        alert.informativeText = "Pawbot will take a quick screenshot of your main display so it can read and explain what's on it. The screenshot is sent to Grok and never saved."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Continue")
-        alert.addButton(withTitle: "Reject")
-        if let icon = NSImage(systemSymbolName: "eye.fill", accessibilityDescription: nil) {
-            alert.icon = icon
-        }
-        return alert.runModal() == .alertFirstButtonReturn
+    static func zoomOut() { sendKey(virtualKey: 27, flags: [.maskCommand, .maskAlternate]) }
+
+    @MainActor
+    private static func sendKey(virtualKey: CGKeyCode, flags: CGEventFlags) {
+        let src = CGEventSource(stateID: .combinedSessionState)
+        let down = CGEvent(keyboardEventSource: src, virtualKey: virtualKey, keyDown: true)
+        down?.flags = flags
+        down?.post(tap: .cgAnnotatedSessionEventTap)
+        let up = CGEvent(keyboardEventSource: src, virtualKey: virtualKey, keyDown: false)
+        up?.flags = flags
+        up?.post(tap: .cgAnnotatedSessionEventTap)
     }
 }
 
@@ -2651,6 +2453,122 @@ struct CalendarPreviewSheet: View {
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+}
+
+struct PawbotSettingsPopover: View {
+    let onZoomIn: () -> Void
+    let onZoomOut: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.gray)
+                Text("Pawbot Settings")
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+            }
+
+            Group {
+                Text("Screen size")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Button(action: onZoomOut) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "minus.magnifyingglass")
+                            Text("Smaller").font(.system(size: 14, weight: .bold, design: .rounded))
+                        }
+                        .padding(.horizontal, 14)
+                        .frame(height: 38)
+                        .background(.white.opacity(0.7), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    Button(action: onZoomIn) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.magnifyingglass")
+                            Text("Bigger").font(.system(size: 14, weight: .bold, design: .rounded))
+                        }
+                        .padding(.horizontal, 14)
+                        .frame(height: 38)
+                        .background(Color.green.opacity(0.95), in: Capsule())
+                        .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text("Make sure Accessibility → Zoom is on with the ⌥⌘= shortcut enabled.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            Text("Permissions Pawbot may need")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.secondary)
+
+            permissionRow(
+                title: "Screen Recording",
+                subtitle: "So Pawbot can read what's on your screen",
+                icon: "rectangle.dashed.badge.record",
+                urlString: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            )
+            permissionRow(
+                title: "Microphone",
+                subtitle: "So you can talk to Pawbot",
+                icon: "mic.fill",
+                urlString: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+            )
+            permissionRow(
+                title: "Speech Recognition",
+                subtitle: "So Pawbot turns your voice into text",
+                icon: "waveform",
+                urlString: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+            )
+            permissionRow(
+                title: "Accessibility",
+                subtitle: "So Pawbot can press the zoom shortcut for you",
+                icon: "accessibility",
+                urlString: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            )
+            permissionRow(
+                title: "Notifications",
+                subtitle: "So Pawbot can ping you about scams or your morning brief",
+                icon: "bell.fill",
+                urlString: "x-apple.systempreferences:com.apple.preference.notifications"
+            )
+        }
+        .padding(18)
+        .frame(width: 380)
+    }
+
+    @ViewBuilder
+    private func permissionRow(title: String, subtitle: String, icon: String, urlString: String) -> some View {
+        Button {
+            if let url = URL(string: urlString) { NSWorkspace.shared.open(url) }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.blue)
+                    .frame(width: 32, height: 32)
+                    .background(.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.system(size: 14, weight: .bold, design: .rounded))
+                    Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "arrow.up.forward.square")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }
 
