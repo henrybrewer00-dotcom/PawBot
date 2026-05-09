@@ -32,7 +32,7 @@ const LOG_ICON = {
 }
 
 export default function Overview() {
-  const { seniorId } = useApp()
+  const { seniorId, account } = useApp()
   const [medStatus, setMedStatus]     = useState(null)
   const [agentLogs, setAgentLogs]     = useState(null)
   const [events, setEvents]           = useState(null)
@@ -108,7 +108,7 @@ export default function Overview() {
       <div className="overview fade-in">
         <div className="ov-header">
           <div>
-            <h1 className="ov-greeting">{greeting()}, Caretaker</h1>
+            <h1 className="ov-greeting">{greeting()}, {account?.name ?? 'there'}</h1>
             <p className="ov-date">{today}</p>
           </div>
           <button
