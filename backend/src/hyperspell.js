@@ -9,7 +9,7 @@ function validateProvider(provider) {
   }
 }
 
-async function hyperspellRequest(path, { method = "GET", query, body, seniorId } = {}) {
+async function hyperspellRequest(path, { method = "GET", query, body, seniorId, authToken } = {}) {
   if (!config.hyperspell.apiKey) return null;
 
   const url = new URL(`${HYPERSPELL_BASE_URL}${path}`);
@@ -20,7 +20,7 @@ async function hyperspellRequest(path, { method = "GET", query, body, seniorId }
   const response = await fetch(url, {
     method,
     headers: {
-      Authorization: `Bearer ${config.hyperspell.apiKey}`,
+      Authorization: `Bearer ${authToken ?? config.hyperspell.apiKey}`,
       Accept: "application/json",
       ...(seniorId ? { "X-As-User": seniorId } : {}),
       ...(body ? { "Content-Type": "application/json" } : {})
@@ -52,6 +52,21 @@ export async function createUserToken(seniorId) {
   }
 }
 
+export async function getUserAuthProfile(seniorId) {
+  if (!config.hyperspell.apiKey) return null;
+
+  try {
+    const tokenData = await createUserToken(seniorId);
+    const token = tokenData?.token ?? tokenData?.user_token;
+    if (!token) return null;
+
+    return await hyperspellRequest("/auth/me", { authToken: token });
+  } catch (error) {
+    console.error("Hyperspell auth profile lookup failed", error);
+    return null;
+  }
+}
+
 export async function getConnectUrl(seniorId, provider, redirectUrl, userToken) {
   validateProvider(provider);
   if (!config.hyperspell.apiKey) return null;
@@ -65,6 +80,7 @@ export async function getConnectUrl(seniorId, provider, redirectUrl, userToken) 
     url.searchParams.set("token", token);
     url.searchParams.set("providers", provider);
     url.searchParams.set("popup", "false");
+    url.searchParams.set("autoclose", "true");
     if (redirectUrl) url.searchParams.set("redirect_uri", redirectUrl);
 
     return { url: url.toString(), expires_at: tokenData?.expires_at ?? null };

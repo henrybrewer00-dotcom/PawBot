@@ -1,7 +1,7 @@
 import { createId } from "./id.js";
 import { writeAgentLog } from "./agentLog.js";
 import { createCalendarEvent, createScamAlert } from "./domain.js";
-import { queryMemory } from "./hyperspell.js";
+import { getUserAuthProfile, queryMemory } from "./hyperspell.js";
 import { saveFactMemory } from "./nia.js";
 
 const CALENDAR_QUERY = "upcoming events this week birthdays appointments";
@@ -21,8 +21,33 @@ const SCAM_SIGNALS = [
   "verify"
 ];
 
-function isConnected(store, seniorId, provider) {
-  return store.all("hyperspellConnections").some((connection) => (
+const PROVIDER_ALIASES = new Map([
+  ["google_calendar", "google_calendar"],
+  ["calendar", "google_calendar"],
+  ["gcal", "google_calendar"],
+  ["gmail", "google_mail"],
+  ["google_mail", "google_mail"],
+  ["google_gmail", "google_mail"],
+  ["mail", "google_mail"]
+]);
+
+export function normalizeHyperspellProvider(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+
+  const key = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (PROVIDER_ALIASES.has(key)) return PROVIDER_ALIASES.get(key);
+  if (key.includes("gmail") || (key.includes("google") && key.includes("mail"))) return "google_mail";
+  if (key.includes("calendar")) return "google_calendar";
+  return null;
+}
+
+async function isConnected(store, seniorId, provider) {
+  return (await store.all("hyperspellConnections")).some((connection) => (
     connection.seniorId === seniorId && connection.provider === provider
   ));
 }
@@ -69,15 +94,15 @@ function todayKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function hasCalendarDuplicate(store, seniorId, title, date) {
-  return store.all("calendarEvents").some((event) => (
+async function hasCalendarDuplicate(store, seniorId, title, date) {
+  return (await store.all("calendarEvents")).some((event) => (
     event.seniorId === seniorId && event.title === title && event.date === date
   ));
 }
 
-function hasScamDuplicateToday(store, seniorId, summary) {
+async function hasScamDuplicateToday(store, seniorId, summary) {
   const today = todayKey();
-  return store.all("scamAlerts").some((alert) => (
+  return (await store.all("scamAlerts")).some((alert) => (
     alert.seniorId === seniorId &&
     alert.summary === summary &&
     String(alert.createdAt ?? "").startsWith(today)
@@ -85,7 +110,7 @@ function hasScamDuplicateToday(store, seniorId, summary) {
 }
 
 export async function syncCalendarEvents(store, seniorId) {
-  if (!isConnected(store, seniorId, "google_calendar")) return [];
+  if (!await isConnected(store, seniorId, "google_calendar")) return [];
 
   const documents = await queryMemory(seniorId, CALENDAR_QUERY, ["google_calendar"]);
   const created = [];
@@ -93,9 +118,9 @@ export async function syncCalendarEvents(store, seniorId) {
   for (const document of documents) {
     const title = titleFromDocument(document, "Google Calendar event");
     const date = dateFromDocument(document);
-    if (!title || !date || hasCalendarDuplicate(store, seniorId, title, date)) continue;
+    if (!title || !date || await hasCalendarDuplicate(store, seniorId, title, date)) continue;
 
-    const event = createCalendarEvent(store, {
+    const event = await createCalendarEvent(store, {
       seniorId,
       createdBy: "hyperspell",
       title,
@@ -113,14 +138,14 @@ export async function syncCalendarEvents(store, seniorId) {
     });
   }
 
-  writeAgentLog(store, seniorId, "hyperspell_calendar_sync", { query: CALENDAR_QUERY }, { created: created.length });
+  void writeAgentLog(store, seniorId, "hyperspell_calendar_sync", { query: CALENDAR_QUERY }, { created: created.length });
   return created;
 }
 
 export async function scanEmailsForScams(store, seniorId) {
-  if (!isConnected(store, seniorId, "google_mail")) return [];
+  if (!await isConnected(store, seniorId, "google_mail")) return [];
 
-  const documents = await queryMemory(seniorId, SCAM_QUERY, ["google_mail"]);
+  const documents = await queryMemory(seniorId, SCAM_QUERY, ["gmail"]);
   const created = [];
 
   for (const document of documents) {
@@ -128,9 +153,9 @@ export async function scanEmailsForScams(store, seniorId) {
     if (!text) continue;
 
     const summary = text.slice(0, 500);
-    if (hasScamDuplicateToday(store, seniorId, summary)) continue;
+    if (await hasScamDuplicateToday(store, seniorId, summary)) continue;
 
-    const alert = createScamAlert(store, {
+    const alert = await createScamAlert(store, {
       seniorId,
       source: sourceFromDocument(document),
       riskLevel: riskLevelFor(text),
@@ -141,7 +166,7 @@ export async function scanEmailsForScams(store, seniorId) {
     created.push(alert);
   }
 
-  writeAgentLog(store, seniorId, "hyperspell_mail_scam_scan", { query: SCAM_QUERY }, { created: created.length });
+  void writeAgentLog(store, seniorId, "hyperspell_mail_scam_scan", { query: SCAM_QUERY }, { created: created.length });
   return created;
 }
 
@@ -157,22 +182,80 @@ export async function syncProvider(store, seniorId, provider) {
   return { calendarEvents: 0, scamAlerts: 0 };
 }
 
-export function recordHyperspellConnection(store, { seniorId, provider }) {
-  const existing = store.find("hyperspellConnections", (connection) => (
-    connection.seniorId === seniorId && connection.provider === provider
+export async function recordHyperspellConnection(store, { seniorId, provider }) {
+  const normalizedProvider = normalizeHyperspellProvider(provider);
+  if (!seniorId || !normalizedProvider) return null;
+
+  const existing = await store.find("hyperspellConnections", (connection) => (
+    connection.seniorId === seniorId && connection.provider === normalizedProvider
   ));
   if (existing) return existing;
 
   return store.insert("hyperspellConnections", {
     id: createId("hspell"),
     seniorId,
-    provider,
+    provider: normalizedProvider,
     connectedAt: new Date().toISOString()
   });
 }
 
+function collectProviderCandidates(value, candidates = []) {
+  if (!value) return candidates;
+
+  if (typeof value === "string") {
+    candidates.push(value);
+    return candidates;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectProviderCandidates(item, candidates);
+    return candidates;
+  }
+
+  if (typeof value !== "object") return candidates;
+
+  const directKeys = ["source", "provider", "name", "slug", "type"];
+  for (const key of directKeys) {
+    if (typeof value[key] === "string") candidates.push(value[key]);
+  }
+
+  const collectionKeys = [
+    "connections",
+    "connected_sources",
+    "connectedSources",
+    "providers",
+    "sources",
+    "integrations",
+    "installed_integrations",
+    "installedIntegrations",
+    "connected_integrations",
+    "connectedIntegrations"
+  ];
+  for (const key of collectionKeys) {
+    collectProviderCandidates(value[key], candidates);
+  }
+
+  return candidates;
+}
+
+export async function refreshHyperspellConnections(store, seniorId) {
+  const profile = await getUserAuthProfile(seniorId);
+  const providers = new Set(
+    collectProviderCandidates(profile)
+      .map(normalizeHyperspellProvider)
+      .filter(Boolean)
+  );
+
+  const recorded = [];
+  for (const provider of providers) {
+    recorded.push(await recordHyperspellConnection(store, { seniorId, provider }));
+  }
+
+  return recorded.filter(Boolean);
+}
+
 export async function runHyperspellSyncTick(store) {
-  const seniors = store.all("users").filter((user) => user.role === "senior");
+  const seniors = (await store.all("users")).filter((user) => user.role === "senior");
   const results = [];
 
   for (const senior of seniors) {

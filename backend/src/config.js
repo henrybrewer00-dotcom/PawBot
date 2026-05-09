@@ -27,6 +27,11 @@ export const config = {
   port: numberFromEnv("PORT", 4000),
   publicBaseUrl: process.env.PUBLIC_BASE_URL ?? "http://localhost:4000",
   agentAuthToken: process.env.AGENT_AUTH_TOKEN ?? "",
+  insforge: {
+    url: process.env.INSFORGE_URL ?? "",
+    apiKey: process.env.INSFORGE_API_KEY ?? "",
+    anonKey: process.env.INSFORGE_ANON_KEY ?? ""
+  },
   sendblue: {
     apiKey: process.env.SENDBLUE_API_KEY ?? "",
     apiSecret: process.env.SENDBLUE_API_SECRET ?? "",

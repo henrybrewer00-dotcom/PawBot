@@ -1,68 +1,55 @@
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { insforge } from "./db.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.resolve(__dirname, "../data");
-const dataPath = path.join(dataDir, "pawbot.json");
+const TABLES = {
+  users: "users",
+  careRelationships: "care_relationships",
+  medications: "medications",
+  medicationLogs: "medication_logs",
+  calendarEvents: "calendar_events",
+  scamAlerts: "scam_alerts",
+  agentLogs: "agent_logs",
+  hyperspellConnections: "hyperspell_connections"
+};
 
-const emptyState = () => ({
-  users: [],
-  careRelationships: [],
-  medications: [],
-  medicationLogs: [],
-  calendarEvents: [],
-  scamAlerts: [],
-  agentLogs: [],
-  hyperspellConnections: []
-});
+const toSnake = (s) => s.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+const toCamel = (s) => s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 
-export class JsonStore {
-  constructor(filePath = dataPath) {
-    this.filePath = filePath;
-    this.state = emptyState();
-    this.load();
+const rowToSnake = (obj) =>
+  Object.fromEntries(Object.entries(obj).map(([k, v]) => [toSnake(k), v]));
+
+const rowToCamel = (obj) =>
+  Object.fromEntries(Object.entries(obj).map(([k, v]) => [toCamel(k), v]));
+
+export class InsForgeStore {
+  async all(collection) {
+    const { data, error } = await insforge.database.from(TABLES[collection]).select();
+    if (error) throw new Error(`store.all(${collection}): ${error.message}`);
+    return (data ?? []).map(rowToCamel);
   }
 
-  load() {
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-    if (!fs.existsSync(this.filePath)) {
-      this.persist();
-      return;
-    }
-
-    const raw = fs.readFileSync(this.filePath, "utf8");
-    this.state = { ...emptyState(), ...JSON.parse(raw) };
+  async find(collection, predicate) {
+    const rows = await this.all(collection);
+    return rows.find(predicate) ?? null;
   }
 
-  persist() {
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-    fs.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2));
+  async insert(collection, item) {
+    const { data, error } = await insforge.database
+      .from(TABLES[collection])
+      .insert([rowToSnake(item)])
+      .select();
+    if (error) throw new Error(`store.insert(${collection}): ${error.message}`);
+    return rowToCamel(data[0]);
   }
 
-  all(collection) {
-    return this.state[collection] ?? [];
-  }
-
-  find(collection, predicate) {
-    return this.all(collection).find(predicate);
-  }
-
-  insert(collection, item) {
-    this.state[collection].push(item);
-    this.persist();
-    return item;
-  }
-
-  update(collection, id, changes) {
-    const items = this.all(collection);
-    const index = items.findIndex((item) => item.id === id);
-    if (index === -1) return null;
-
-    items[index] = { ...items[index], ...changes };
-    this.persist();
-    return items[index];
+  async update(collection, id, changes) {
+    const { data, error } = await insforge.database
+      .from(TABLES[collection])
+      .update(rowToSnake(changes))
+      .eq("id", id)
+      .select();
+    if (error) throw new Error(`store.update(${collection}): ${error.message}`);
+    return data[0] ? rowToCamel(data[0]) : null;
   }
 }
 
-export const store = new JsonStore();
+export const store = new InsForgeStore();

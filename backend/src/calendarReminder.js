@@ -13,9 +13,8 @@ export async function runCalendarReminderAgent(store) {
   const now = new Date();
   const reminders = [];
 
-  for (const senior of store.all("users").filter((user) => user.role === "senior")) {
-    const events = store
-      .all("calendarEvents")
+  for (const senior of (await store.all("users")).filter((user) => user.role === "senior")) {
+    const events = (await store.all("calendarEvents"))
       .filter((event) => event.seniorId === senior.id && reminderDue(event, senior, now));
 
     for (const event of events) {
@@ -24,11 +23,11 @@ export async function runCalendarReminderAgent(store) {
         content: `PawBot reminder: ${event.title} is on your calendar today.`
       });
 
-      const updated = store.update("calendarEvents", event.id, {
+      const updated = await store.update("calendarEvents", event.id, {
         reminderSentAt: now.toISOString()
       });
 
-      writeAgentLog(
+      void writeAgentLog(
         store,
         senior.id,
         "calendar_event_reminder_sent",

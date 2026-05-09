@@ -10,12 +10,11 @@ function todayItems(items, dateField, timezone) {
   });
 }
 
-function caretakersForSenior(store, seniorId) {
-  return store
-    .all("careRelationships")
-    .filter((relationship) => relationship.seniorId === seniorId)
-    .map((relationship) => store.find("users", (user) => user.id === relationship.caretakerId))
-    .filter(Boolean);
+async function caretakersForSenior(store, seniorId) {
+  const relationships = (await store.all("careRelationships")).filter((r) => r.seniorId === seniorId);
+  return (await Promise.all(
+    relationships.map((r) => store.find("users", (user) => user.id === r.caretakerId))
+  )).filter(Boolean);
 }
 
 function buildSummary(senior, counts) {
@@ -32,19 +31,19 @@ function buildSummary(senior, counts) {
 export async function runDailySummaryAgent(store) {
   const summaries = [];
 
-  for (const senior of store.all("users").filter((user) => user.role === "senior")) {
+  for (const senior of (await store.all("users")).filter((user) => user.role === "senior")) {
     const medicationLogs = todayItems(
-      store.all("medicationLogs").filter((log) => log.seniorId === senior.id),
+      (await store.all("medicationLogs")).filter((log) => log.seniorId === senior.id),
       "scheduledFor",
       senior.timezone
     );
     const scamAlerts = todayItems(
-      store.all("scamAlerts").filter((alert) => alert.seniorId === senior.id),
+      (await store.all("scamAlerts")).filter((alert) => alert.seniorId === senior.id),
       "createdAt",
       senior.timezone
     );
     const calendarReminders = todayItems(
-      store.all("agentLogs").filter((log) => log.seniorId === senior.id && log.agentAction === "calendar_event_reminder_sent"),
+      (await store.all("agentLogs")).filter((log) => log.seniorId === senior.id && log.agentAction === "calendar_event_reminder_sent"),
       "createdAt",
       senior.timezone
     );
@@ -57,7 +56,7 @@ export async function runDailySummaryAgent(store) {
       calendarReminders: calendarReminders.length
     };
     const summary = buildSummary(senior, counts);
-    const caretakers = caretakersForSenior(store, senior.id);
+    const caretakers = await caretakersForSenior(store, senior.id);
     const results = [];
 
     for (const caretaker of caretakers) {
@@ -67,7 +66,7 @@ export async function runDailySummaryAgent(store) {
       }));
     }
 
-    writeAgentLog(
+    void writeAgentLog(
       store,
       senior.id,
       "daily_summary_sent",

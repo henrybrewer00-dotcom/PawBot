@@ -1,8 +1,8 @@
 import { createId } from "./id.js";
 import { saveEpisodicMemory } from "./nia.js";
 
-export function writeAgentLog(store, seniorId, agentAction, contextUsed, result) {
-  const log = store.insert("agentLogs", {
+export async function writeAgentLog(store, seniorId, agentAction, contextUsed, result) {
+  const log = await store.insert("agentLogs", {
     id: createId("log"),
     seniorId,
     agentAction,

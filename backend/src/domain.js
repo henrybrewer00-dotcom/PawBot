@@ -8,7 +8,7 @@ import { minutesBetween, scheduledIsoForLocalTime, toDateKey, toLocalTime } from
 
 const TAKEN_REPLIES = new Set(["YES", "Y", "DONE", "TAKEN", "TOOK IT", "TAKE"]);
 
-export function createUser(store, { name, phone, email, role, timezone = "America/Los_Angeles" }) {
+export async function createUser(store, { name, phone, email, role, timezone = "America/Los_Angeles" }) {
   if (!["senior", "caretaker"].includes(role)) {
     throw new HttpError(400, "role must be senior or caretaker");
   }
@@ -24,9 +24,9 @@ export function createUser(store, { name, phone, email, role, timezone = "Americ
   });
 }
 
-export function linkCaretakerToSenior(store, { caretakerId, seniorId, permissionLevel = "manager" }) {
-  const caretaker = store.find("users", (user) => user.id === caretakerId && user.role === "caretaker");
-  const senior = store.find("users", (user) => user.id === seniorId && user.role === "senior");
+export async function linkCaretakerToSenior(store, { caretakerId, seniorId, permissionLevel = "manager" }) {
+  const caretaker = await store.find("users", (user) => user.id === caretakerId && user.role === "caretaker");
+  const senior = await store.find("users", (user) => user.id === seniorId && user.role === "senior");
   if (!caretaker) throw new HttpError(404, "Caretaker not found");
   if (!senior) throw new HttpError(404, "Senior not found");
 
@@ -38,9 +38,9 @@ export function linkCaretakerToSenior(store, { caretakerId, seniorId, permission
   });
 }
 
-export function createMedication(store, body) {
-  const senior = store.find("users", (user) => user.id === body.seniorId && user.role === "senior");
-  const creator = store.find("users", (user) => user.id === body.createdBy);
+export async function createMedication(store, body) {
+  const senior = await store.find("users", (user) => user.id === body.seniorId && user.role === "senior");
+  const creator = await store.find("users", (user) => user.id === body.createdBy);
   if (!senior) throw new HttpError(404, "Senior not found");
   if (!creator) throw new HttpError(404, "Creator not found");
   if (!Array.isArray(body.times) || body.times.length === 0) {
@@ -61,17 +61,17 @@ export function createMedication(store, body) {
   });
 }
 
-export function updateMedication(store, id, changes) {
-  const medication = store.update("medications", id, changes);
+export async function updateMedication(store, id, changes) {
+  const medication = await store.update("medications", id, changes);
   if (!medication) throw new HttpError(404, "Medication not found");
   return medication;
 }
 
-export function getMedicationsForSenior(store, seniorId) {
-  return store.all("medications").filter((medication) => medication.seniorId === seniorId);
+export async function getMedicationsForSenior(store, seniorId) {
+  return (await store.all("medications")).filter((medication) => medication.seniorId === seniorId);
 }
 
-export function createMedicationLog(store, body) {
+export async function createMedicationLog(store, body) {
   return store.insert("medicationLogs", {
     id: createId("medlog"),
     medicationId: body.medicationId,
@@ -84,24 +84,24 @@ export function createMedicationLog(store, body) {
   });
 }
 
-export function markMedicationTaken(store, logId, replyText = "Manual confirmation") {
-  const log = store.update("medicationLogs", logId, {
+export async function markMedicationTaken(store, logId, replyText = "Manual confirmation") {
+  const log = await store.update("medicationLogs", logId, {
     status: "taken",
     confirmedAt: new Date().toISOString(),
     replyText
   });
   if (!log) throw new HttpError(404, "Medication log not found");
-  writeAgentLog(store, log.seniorId, "medication_marked_taken", { logId }, { status: "taken" });
+  void writeAgentLog(store, log.seniorId, "medication_marked_taken", { logId }, { status: "taken" });
   return log;
 }
 
-export function getTodayMedicationStatus(store, seniorId) {
-  const senior = store.find("users", (user) => user.id === seniorId);
+export async function getTodayMedicationStatus(store, seniorId) {
+  const senior = await store.find("users", (user) => user.id === seniorId);
   if (!senior) throw new HttpError(404, "Senior not found");
 
   const today = toDateKey(new Date(), senior.timezone);
-  const medications = getMedicationsForSenior(store, seniorId).filter((medication) => medication.active);
-  const logs = store.all("medicationLogs").filter((log) => log.seniorId === seniorId);
+  const medications = (await getMedicationsForSenior(store, seniorId)).filter((medication) => medication.active);
+  const logs = (await store.all("medicationLogs")).filter((log) => log.seniorId === seniorId);
 
   return medications.flatMap((medication) => {
     return medication.times.map((time) => {
@@ -120,9 +120,8 @@ export function getTodayMedicationStatus(store, seniorId) {
   });
 }
 
-function latestActionableLog(store, seniorId) {
-  const open = store
-    .all("medicationLogs")
+async function latestActionableLog(store, seniorId) {
+  const open = (await store.all("medicationLogs"))
     .filter((log) => log.seniorId === seniorId && ["sent", "pending"].includes(log.status))
     .sort((a, b) => new Date(b.scheduledFor) - new Date(a.scheduledFor));
 
@@ -130,11 +129,11 @@ function latestActionableLog(store, seniorId) {
 }
 
 export async function sendMedicationReminder(store, logId, { followUp = false } = {}) {
-  const log = store.find("medicationLogs", (item) => item.id === logId);
+  const log = await store.find("medicationLogs", (item) => item.id === logId);
   if (!log) throw new HttpError(404, "Medication log not found");
 
-  const senior = store.find("users", (user) => user.id === log.seniorId);
-  const medication = store.find("medications", (item) => item.id === log.medicationId);
+  const senior = await store.find("users", (user) => user.id === log.seniorId);
+  const medication = await store.find("medications", (item) => item.id === log.medicationId);
   if (!senior || !medication) throw new HttpError(404, "Senior or medication not found");
 
   const content = followUp
@@ -147,13 +146,13 @@ export async function sendMedicationReminder(store, logId, { followUp = false } 
     statusCallback: `${config.publicBaseUrl}/webhooks/sendblue/status`
   });
 
-  const updated = store.update("medicationLogs", log.id, {
+  const updated = await store.update("medicationLogs", log.id, {
     status: "sent",
     sentAt: log.sentAt ?? new Date().toISOString(),
     followUpSentAt: followUp ? new Date().toISOString() : log.followUpSentAt
   });
 
-  writeAgentLog(
+  void writeAgentLog(
     store,
     senior.id,
     followUp ? "medication_follow_up_sent" : "medication_reminder_sent",
@@ -165,15 +164,15 @@ export async function sendMedicationReminder(store, logId, { followUp = false } 
 }
 
 export async function escalateMissedMedication(store, logId) {
-  const log = store.find("medicationLogs", (item) => item.id === logId);
+  const log = await store.find("medicationLogs", (item) => item.id === logId);
   if (!log) throw new HttpError(404, "Medication log not found");
 
-  const senior = store.find("users", (user) => user.id === log.seniorId);
-  const medication = store.find("medications", (item) => item.id === log.medicationId);
-  const relationships = store.all("careRelationships").filter((rel) => rel.seniorId === log.seniorId);
-  const caretakers = relationships
-    .map((rel) => store.find("users", (user) => user.id === rel.caretakerId))
-    .filter(Boolean);
+  const senior = await store.find("users", (user) => user.id === log.seniorId);
+  const medication = await store.find("medications", (item) => item.id === log.medicationId);
+  const relationships = (await store.all("careRelationships")).filter((rel) => rel.seniorId === log.seniorId);
+  const caretakers = (await Promise.all(
+    relationships.map((rel) => store.find("users", (user) => user.id === rel.caretakerId))
+  )).filter(Boolean);
 
   const results = [];
   for (const caretaker of caretakers) {
@@ -184,11 +183,11 @@ export async function escalateMissedMedication(store, logId) {
     }));
   }
 
-  const updated = store.update("medicationLogs", log.id, {
+  const updated = await store.update("medicationLogs", log.id, {
     status: "escalated"
   });
 
-  writeAgentLog(store, log.seniorId, "missed_medication_escalated", { logId, medicationId: medication.id }, { caretakersNotified: caretakers.length, results });
+  void writeAgentLog(store, log.seniorId, "missed_medication_escalated", { logId, medicationId: medication.id }, { caretakersNotified: caretakers.length, results });
   void saveFactMemory(log.seniorId, "missed-dose-pattern", {
     medicationId: medication.id,
     medicationName: medication.name,
@@ -205,29 +204,29 @@ export async function handleIncomingTextReply(store, payload) {
   const replyText = String(payload.content ?? payload.text ?? payload.body ?? "").trim();
   if (!from || !replyText) throw new HttpError(400, "Inbound text needs sender and content");
 
-  const senior = store.find("users", (user) => user.role === "senior" && user.phone === from);
+  const senior = await store.find("users", (user) => user.role === "senior" && user.phone === from);
   if (!senior) throw new HttpError(404, "No senior found for inbound phone number");
 
   const normalized = replyText.toUpperCase();
-  const log = latestActionableLog(store, senior.id);
+  const log = await latestActionableLog(store, senior.id);
   if (!log) {
-    writeAgentLog(store, senior.id, "unmatched_text_reply", { from, replyText }, { matched: false });
+    void writeAgentLog(store, senior.id, "unmatched_text_reply", { from, replyText }, { matched: false });
     return { matched: false, replyText };
   }
 
   if ([...TAKEN_REPLIES].some((accepted) => normalized.includes(accepted))) {
     return {
       matched: true,
-      log: markMedicationTaken(store, log.id, replyText)
+      log: await markMedicationTaken(store, log.id, replyText)
     };
   }
 
-  store.update("medicationLogs", log.id, { replyText });
-  writeAgentLog(store, senior.id, "text_reply_received", { logId: log.id, replyText }, { matched: true, status: log.status });
+  await store.update("medicationLogs", log.id, { replyText });
+  void writeAgentLog(store, senior.id, "text_reply_received", { logId: log.id, replyText }, { matched: true, status: log.status });
   return { matched: true, log };
 }
 
-export function createCalendarEvent(store, body) {
+export async function createCalendarEvent(store, body) {
   return store.insert("calendarEvents", {
     id: createId("event"),
     seniorId: body.seniorId,
@@ -240,16 +239,21 @@ export function createCalendarEvent(store, body) {
   });
 }
 
-export function getUpcomingCalendarEvents(store, seniorId) {
+export async function getScamAlertsForSenior(store, seniorId) {
+  return (await store.all("scamAlerts"))
+    .filter((alert) => alert.seniorId === seniorId)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+}
+
+export async function getUpcomingCalendarEvents(store, seniorId) {
   const now = new Date();
-  return store
-    .all("calendarEvents")
+  return (await store.all("calendarEvents"))
     .filter((event) => event.seniorId === seniorId && new Date(event.date) >= now)
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
-export function createScamAlert(store, body) {
-  const alert = store.insert("scamAlerts", {
+export async function createScamAlert(store, body) {
+  const alert = await store.insert("scamAlerts", {
     id: createId("scam"),
     seniorId: body.seniorId,
     source: body.source,
@@ -259,7 +263,7 @@ export function createScamAlert(store, body) {
     caretakerNotified: body.caretakerNotified ?? false,
     createdAt: new Date().toISOString()
   });
-  writeAgentLog(store, body.seniorId, "scam_alert_created", { source: body.source, riskLevel: body.riskLevel }, alert);
+  void writeAgentLog(store, body.seniorId, "scam_alert_created", { source: body.source, riskLevel: body.riskLevel }, alert);
   void saveFactMemory(body.seniorId, "scam-risk", {
     source: body.source,
     riskLevel: body.riskLevel,
@@ -274,23 +278,23 @@ export function createScamAlert(store, body) {
 
 export async function runMedicationAgentTick(store) {
   const now = new Date();
-  const seniors = store.all("users").filter((user) => user.role === "senior");
+  const seniors = (await store.all("users")).filter((user) => user.role === "senior");
   const work = [];
   const summaries = [];
 
   for (const senior of seniors) {
     const dateKey = toDateKey(now, senior.timezone);
     const currentTime = toLocalTime(now, senior.timezone);
-    const meds = getMedicationsForSenior(store, senior.id).filter((medication) => medication.active);
+    const meds = (await getMedicationsForSenior(store, senior.id)).filter((medication) => medication.active);
     const memoryContext = await searchSeniorMemory(senior.id, "today medication");
+    const allLogs = await store.all("medicationLogs");
     const summary = {
       seniorId: senior.id,
       dateKey,
       memoryContextLoaded: memoryContext.length,
       remindersSent: 0,
       followUpsSent: 0,
-      confirmationsToday: store
-        .all("medicationLogs")
+      confirmationsToday: allLogs
         .filter((log) => log.seniorId === senior.id && log.status === "taken" && toDateKey(new Date(log.confirmedAt ?? log.scheduledFor), senior.timezone) === dateKey)
         .length,
       escalations: 0
@@ -300,10 +304,10 @@ export async function runMedicationAgentTick(store) {
     for (const medication of meds) {
       for (const time of medication.times) {
         const scheduledFor = scheduledIsoForLocalTime(dateKey, time, senior.timezone);
-        let log = store.find("medicationLogs", (item) => item.medicationId === medication.id && item.scheduledFor === scheduledFor);
+        let log = allLogs.find((item) => item.medicationId === medication.id && item.scheduledFor === scheduledFor);
 
         if (!log && time <= currentTime) {
-          log = createMedicationLog(store, {
+          log = await createMedicationLog(store, {
             medicationId: medication.id,
             seniorId: senior.id,
             scheduledFor

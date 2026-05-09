@@ -11,6 +11,7 @@ import {
   createUser,
   escalateMissedMedication,
   getMedicationsForSenior,
+  getScamAlertsForSenior,
   getTodayMedicationStatus,
   getUpcomingCalendarEvents,
   handleIncomingTextReply,
@@ -23,6 +24,8 @@ import {
 import { searchSeniorMemory } from "./nia.js";
 import { createUserToken, getConnectUrl, HYPERSPELL_PROVIDERS } from "./hyperspell.js";
 import {
+  normalizeHyperspellProvider,
+  refreshHyperspellConnections,
   recordHyperspellConnection,
   runHyperspellSyncTick,
   scanEmailsForScams,
@@ -51,46 +54,46 @@ export function createRouter(store) {
     res.json({ ok: true, service: "pawbot-backend" });
   });
 
-  router.post("/api/seniors", (req, res) => {
+  router.post("/api/seniors", asyncHandler(async (req, res) => {
     requireFields(req.body, ["name", "phone", "email"]);
-    res.status(201).json(createUser(store, { ...req.body, role: "senior" }));
-  });
+    res.status(201).json(await createUser(store, { ...req.body, role: "senior" }));
+  }));
 
-  router.post("/api/caretakers", (req, res) => {
+  router.post("/api/caretakers", asyncHandler(async (req, res) => {
     requireFields(req.body, ["name", "phone", "email"]);
-    res.status(201).json(createUser(store, { ...req.body, role: "caretaker" }));
-  });
+    res.status(201).json(await createUser(store, { ...req.body, role: "caretaker" }));
+  }));
 
-  router.post("/api/care-relationships", (req, res) => {
+  router.post("/api/care-relationships", asyncHandler(async (req, res) => {
     requireFields(req.body, ["caretakerId", "seniorId"]);
-    res.status(201).json(linkCaretakerToSenior(store, req.body));
-  });
+    res.status(201).json(await linkCaretakerToSenior(store, req.body));
+  }));
 
-  router.post("/api/medications", (req, res) => {
+  router.post("/api/medications", asyncHandler(async (req, res) => {
     requireFields(req.body, ["seniorId", "createdBy", "name", "dosage", "times"]);
-    res.status(201).json(createMedication(store, req.body));
-  });
+    res.status(201).json(await createMedication(store, req.body));
+  }));
 
-  router.patch("/api/medications/:id", (req, res) => {
-    res.json(updateMedication(store, req.params.id, req.body));
-  });
+  router.patch("/api/medications/:id", asyncHandler(async (req, res) => {
+    res.json(await updateMedication(store, req.params.id, req.body));
+  }));
 
-  router.get("/api/seniors/:seniorId/medications", (req, res) => {
-    res.json(getMedicationsForSenior(store, req.params.seniorId));
-  });
+  router.get("/api/seniors/:seniorId/medications", asyncHandler(async (req, res) => {
+    res.json(await getMedicationsForSenior(store, req.params.seniorId));
+  }));
 
-  router.post("/api/medication-logs", (req, res) => {
+  router.post("/api/medication-logs", asyncHandler(async (req, res) => {
     requireFields(req.body, ["medicationId", "seniorId", "scheduledFor"]);
-    res.status(201).json(createMedicationLog(store, req.body));
-  });
+    res.status(201).json(await createMedicationLog(store, req.body));
+  }));
 
-  router.post("/api/medication-logs/:id/taken", (req, res) => {
-    res.json(markMedicationTaken(store, req.params.id, req.body.replyText));
-  });
+  router.post("/api/medication-logs/:id/taken", asyncHandler(async (req, res) => {
+    res.json(await markMedicationTaken(store, req.params.id, req.body.replyText));
+  }));
 
-  router.get("/api/seniors/:seniorId/medication-status/today", (req, res) => {
-    res.json(getTodayMedicationStatus(store, req.params.seniorId));
-  });
+  router.get("/api/seniors/:seniorId/medication-status/today", asyncHandler(async (req, res) => {
+    res.json(await getTodayMedicationStatus(store, req.params.seniorId));
+  }));
 
   router.post("/api/medication-logs/:id/send-reminder", asyncHandler(async (req, res) => {
     res.json(await sendMedicationReminder(store, req.params.id));
@@ -100,27 +103,30 @@ export function createRouter(store) {
     res.json(await escalateMissedMedication(store, req.params.id));
   }));
 
-  router.post("/api/calendar-events", (req, res) => {
+  router.post("/api/calendar-events", asyncHandler(async (req, res) => {
     requireFields(req.body, ["seniorId", "createdBy", "title", "date"]);
-    res.status(201).json(createCalendarEvent(store, req.body));
-  });
+    res.status(201).json(await createCalendarEvent(store, req.body));
+  }));
 
-  router.get("/api/seniors/:seniorId/calendar-events/upcoming", (req, res) => {
-    res.json(getUpcomingCalendarEvents(store, req.params.seniorId));
-  });
+  router.get("/api/seniors/:seniorId/calendar-events/upcoming", asyncHandler(async (req, res) => {
+    res.json(await getUpcomingCalendarEvents(store, req.params.seniorId));
+  }));
 
-  router.post("/api/scam-alerts", (req, res) => {
+  router.post("/api/scam-alerts", asyncHandler(async (req, res) => {
     requireFields(req.body, ["seniorId", "source", "riskLevel", "summary"]);
-    res.status(201).json(createScamAlert(store, req.body));
-  });
+    res.status(201).json(await createScamAlert(store, req.body));
+  }));
 
-  router.get("/api/seniors/:seniorId/agent-logs", (req, res) => {
-    const logs = store
-      .all("agentLogs")
+  router.get("/api/seniors/:seniorId/scam-alerts", asyncHandler(async (req, res) => {
+    res.json(await getScamAlertsForSenior(store, req.params.seniorId));
+  }));
+
+  router.get("/api/seniors/:seniorId/agent-logs", asyncHandler(async (req, res) => {
+    const logs = (await store.all("agentLogs"))
       .filter((log) => log.seniorId === req.params.seniorId)
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json(logs);
-  });
+  }));
 
   router.get("/api/seniors/:seniorId/memory/search", asyncHandler(async (req, res) => {
     const query = String(req.query.q ?? "").trim();
@@ -136,18 +142,22 @@ export function createRouter(store) {
     requireFields(req.body, ["provider"]);
     requireHyperspellProvider(req.body.provider);
 
-    const redirectUrl = req.body.redirectUrl ?? `${config.hyperspell.publicBaseUrl}/webhooks/hyperspell/connected`;
+    const fallbackRedirectUrl = new URL("/webhooks/hyperspell/connected", config.hyperspell.publicBaseUrl);
+    fallbackRedirectUrl.searchParams.set("seniorId", req.params.seniorId);
+    fallbackRedirectUrl.searchParams.set("provider", req.body.provider);
+
+    const redirectUrl = req.body.redirectUrl ?? fallbackRedirectUrl.toString();
     const userToken = await createUserToken(req.params.seniorId);
     const connect = await getConnectUrl(req.params.seniorId, req.body.provider, redirectUrl, userToken);
     res.json(connect ?? { url: null, expires_at: null });
   }));
 
-  router.get("/api/seniors/:seniorId/hyperspell/connections", (req, res) => {
-    const connections = store
-      .all("hyperspellConnections")
+  router.get("/api/seniors/:seniorId/hyperspell/connections", asyncHandler(async (req, res) => {
+    await refreshHyperspellConnections(store, req.params.seniorId);
+    const connections = (await store.all("hyperspellConnections"))
       .filter((connection) => connection.seniorId === req.params.seniorId);
     res.json(connections);
-  });
+  }));
 
   router.post("/api/seniors/:seniorId/hyperspell/sync", asyncHandler(async (req, res) => {
     const calendarEvents = await syncCalendarEvents(store, req.params.seniorId);
@@ -195,12 +205,40 @@ export function createRouter(store) {
     res.json({ ok: true });
   });
 
-  router.post("/webhooks/hyperspell/connected", asyncHandler(async (req, res) => {
-    requireFields(req.body, ["seniorId", "provider"]);
-    requireHyperspellProvider(req.body.provider);
+  router.get("/webhooks/hyperspell/connected", asyncHandler(async (req, res) => {
+    const seniorId = String(req.query.seniorId ?? "");
+    const provider = normalizeHyperspellProvider(req.query.provider);
+    if (seniorId && provider) {
+      await recordHyperspellConnection(store, { seniorId, provider });
+      await syncProvider(store, seniorId, provider);
+    }
 
-    const connection = recordHyperspellConnection(store, req.body);
-    const synced = await syncProvider(store, req.body.seniorId, req.body.provider);
+    res
+      .type("html")
+      .send(`<!doctype html>
+<html>
+  <head><title>PawBot connected</title></head>
+  <body>
+    <p>Google account connected. You can return to PawBot.</p>
+    <script>window.close();</script>
+  </body>
+</html>`);
+  }));
+
+  router.post("/webhooks/hyperspell/connected", asyncHandler(async (req, res) => {
+    const seniorId = req.body.seniorId ?? req.body.user_id;
+    const provider = normalizeHyperspellProvider(req.body.provider ?? req.body.source);
+    if (!seniorId || !provider) {
+      throw new HttpError(400, "Hyperspell webhook must include user_id/seniorId and source/provider");
+    }
+
+    if (req.body.event && req.body.event !== "connection-created") {
+      res.json({ ok: true, ignored: req.body.event });
+      return;
+    }
+
+    const connection = await recordHyperspellConnection(store, { seniorId, provider });
+    const synced = await syncProvider(store, seniorId, provider);
     res.json({ connection, synced });
   }));
 
