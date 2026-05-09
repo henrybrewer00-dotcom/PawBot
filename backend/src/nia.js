@@ -122,15 +122,14 @@ export async function searchSeniorMemory(seniorId, query) {
   if (!config.nia.apiKey) return [];
 
   try {
-    const response = await niaRequest("/contexts/search/semantic", {
-      method: "POST",
-      body: {
+    const response = await niaRequest("/contexts", {
+      query: {
+        tags: `senior:${seniorId}`,
         q: query,
-        limit: 20,
-        include_highlights: true
+        limit: 20
       }
     });
-    const results = Array.isArray(response?.results) ? response.results : [];
+    const results = Array.isArray(response?.items) ? response.items : [];
     return results.filter((result) => hasSeniorTag(result, seniorId));
   } catch (error) {
     console.error("Nia memory search failed", error);
