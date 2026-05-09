@@ -4,6 +4,7 @@ import Combine
 import SQLite3
 import Speech
 import SwiftUI
+import UserNotifications
 
 @main
 struct PawbotPrototypeApp: App {
@@ -50,10 +51,20 @@ final class PawbotModel: ObservableObject {
     @Published var isPawbotThinking = false
     @Published var fontScale: CGFloat = 1.0
     @Published var isSpeaking = false
+    @Published var calendarPreview: [PawbotCalendarEvent] = []
+    @Published var gmailPreview: [PawbotGmailMessage] = []
+    @Published var calendarLoadingError: String?
+    @Published var gmailLoadingError: String?
+    @Published var isCalendarLoading = false
+    @Published var isGmailLoading = false
+    @Published var showCalendarPopover = false
+    @Published var showGmailPopover = false
 
     private let speech = PawbotSpeech()
     private let voice = PawbotVoiceInput()
     private var screenshotPollingTask: Task<Void, Never>?
+    private var scamPollTask: Task<Void, Never>?
+    private var seenScamIDs: Set<String> = []
 
     let actions = [
         PawbotAction(title: "Explain my screen", subtitle: "See and explain it plainly", icon: "eye.fill", color: .orange),
@@ -353,6 +364,99 @@ final class PawbotModel: ObservableObject {
         Task { await PawbotAI.shared.recordExchange(user: user, assistant: assistant) }
     }
 
+    func startBackgroundPolling() {
+        scamPollTask?.cancel()
+        scamPollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard let self else { return }
+                await self.pollScamAlerts()
+            }
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            await self?.pollScamAlerts()
+        }
+    }
+
+    private func pollScamAlerts() async {
+        do {
+            let alerts = try await PawbotBackend.shared.scamAlerts()
+            for alert in alerts where !seenScamIDs.contains(alert.id) {
+                seenScamIDs.insert(alert.id)
+                presentScamAlert(alert)
+            }
+        } catch { /* backend down or not configured — silent */ }
+    }
+
+    private func presentScamAlert(_ alert: PawbotScamAlert) {
+        if !hasStartedConversation {
+            withAnimation(.easeInOut(duration: 0.55)) { hasStartedConversation = true }
+        }
+        let badge = alert.verdict == "SCAM" ? "🚨 Possible scam" : "⚠️ Suspicious email"
+        let body = """
+        \(badge)
+        From: \(alert.from)
+        Subject: \(alert.subject)
+        Why I flagged it: \(alert.reason)
+
+        Don't click any links or share personal info. Tap My Messages or Check my stuff for context. Want me to help you decide what to do?
+        """
+        appendBot(body)
+        PawbotNotifier.notify(title: badge, body: "\(alert.subject) — from \(alert.from)")
+        Task { await PawbotAI.shared.recordExchange(
+            user: "[Pawbot detected a possibly-scam email and showed the user]",
+            assistant: "Flagged \(alert.verdict): from \(alert.from), subject \"\(alert.subject)\". Reason: \(alert.reason)."
+        ) }
+        Task { try? await PawbotBackend.shared.dismissScamAlert(id: alert.id) }
+    }
+
+    func loadCalendarPreview() {
+        isCalendarLoading = true
+        calendarLoadingError = nil
+        Task { @MainActor in
+            do {
+                let events = try await PawbotBackend.shared.upcomingEvents(limit: 5)
+                calendarPreview = events
+                isCalendarLoading = false
+            } catch let error as PawbotBackendError {
+                isCalendarLoading = false
+                calendarLoadingError = error.errorDescription
+            } catch {
+                isCalendarLoading = false
+                calendarLoadingError = error.localizedDescription
+            }
+        }
+    }
+
+    func loadGmailPreview() {
+        isGmailLoading = true
+        gmailLoadingError = nil
+        Task { @MainActor in
+            do {
+                let emails = try await PawbotBackend.shared.recentGmail(limit: 5)
+                gmailPreview = emails
+                isGmailLoading = false
+            } catch let error as PawbotBackendError {
+                isGmailLoading = false
+                gmailLoadingError = error.errorDescription
+            } catch {
+                isGmailLoading = false
+                gmailLoadingError = error.localizedDescription
+            }
+        }
+    }
+
+    func toggleCalendarPopover() {
+        showCalendarPopover.toggle()
+        if showCalendarPopover { loadCalendarPreview() }
+    }
+
+    func toggleGmailPopover() {
+        showGmailPopover.toggle()
+        if showGmailPopover { loadGmailPreview() }
+    }
+
     private func startScreenshotPolling(retryPrompt: String?) {
         screenshotPollingTask?.cancel()
         isPawbotThinking = true
@@ -547,6 +651,7 @@ final class PawbotWindowController {
         resizeWindow(forConversation: model.hasStartedConversation, animated: false)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        model.startBackgroundPolling()
     }
 
     private func takeKeyFocus() {
@@ -703,6 +808,38 @@ struct PawbotRootView: View {
 
                 Spacer()
 
+                Button(action: model.toggleCalendarPopover) {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 18, weight: .bold))
+                        .frame(width: 38, height: 38)
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Upcoming events")
+                .popover(isPresented: $model.showCalendarPopover, arrowEdge: .bottom) {
+                    CalendarPreviewSheet(
+                        events: model.calendarPreview,
+                        isLoading: model.isCalendarLoading,
+                        error: model.calendarLoadingError,
+                        onRefresh: model.loadCalendarPreview
+                    )
+                }
+
+                Button(action: model.toggleGmailPopover) {
+                    Image(systemName: "envelope.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .frame(width: 38, height: 38)
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Recent emails")
+                .popover(isPresented: $model.showGmailPopover, arrowEdge: .bottom) {
+                    GmailPreviewSheet(
+                        emails: model.gmailPreview,
+                        isLoading: model.isGmailLoading,
+                        error: model.gmailLoadingError,
+                        onRefresh: model.loadGmailPreview
+                    )
+                }
+
                 if model.hasStartedConversation {
                     Button(action: model.goHome) {
                         Image(systemName: "house.fill")
@@ -711,13 +848,6 @@ struct PawbotRootView: View {
                     }
                     .buttonStyle(IconButtonStyle())
                     .help("Back to home")
-                } else {
-                    Button(action: model.cycleNotice) {
-                        Image(systemName: "bell.badge.fill")
-                            .font(.system(size: 20, weight: .bold))
-                            .frame(width: 42, height: 42)
-                    }
-                    .buttonStyle(IconButtonStyle())
                 }
             }
 
@@ -1407,7 +1537,7 @@ final class PawbotVoiceInput {
     }
 }
 
-struct PawbotGmailMessage: Decodable {
+struct PawbotGmailMessage: Decodable, Identifiable {
     let id: String
     let from: String
     let subject: String
@@ -1415,15 +1545,40 @@ struct PawbotGmailMessage: Decodable {
     let date: String?
 }
 
+struct PawbotCalendarEvent: Decodable, Identifiable {
+    let id: String
+    let title: String
+    let start: String?
+    let end: String?
+    let location: String?
+    let description: String?
+}
+
+struct PawbotScamAlert: Decodable, Identifiable {
+    let id: String
+    let verdict: String
+    let reason: String
+    let from: String
+    let subject: String
+    let snippet: String
+    let detectedAt: String
+}
+
+struct PawbotScamAlertsResponse: Decodable {
+    let alerts: [PawbotScamAlert]
+}
+
 enum PawbotBackendError: Error, LocalizedError {
     case notRunning
     case gmailNotConfigured
+    case calendarNotConfigured
     case badResponse(Int, String)
 
     var errorDescription: String? {
         switch self {
         case .notRunning: return "Backend isn't running. Start it with `cd backend && npm run dev`."
-        case .gmailNotConfigured: return "Gmail isn't connected yet. Set up Insforge OAuth in the backend."
+        case .gmailNotConfigured: return "Gmail isn't connected yet. Set COMPOSIO_API_KEY and connect Gmail in Composio."
+        case .calendarNotConfigured: return "Calendar isn't connected yet. Set COMPOSIO_API_KEY and connect Google Calendar in Composio."
         case .badResponse(let code, let body): return "Backend returned HTTP \(code): \(body.prefix(160))"
         }
     }
@@ -1433,11 +1588,11 @@ actor PawbotBackend {
     static let shared = PawbotBackend()
     private let baseURL = URL(string: "http://localhost:4000")!
 
-    func recentGmail(limit: Int = 5) async throws -> [PawbotGmailMessage] {
-        var components = URLComponents(url: baseURL.appendingPathComponent("/api/gmail/recent"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
+    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], notConfiguredError: PawbotBackendError) async throws -> T {
+        var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+        if !query.isEmpty { components.queryItems = query }
         var request = URLRequest(url: components.url!)
-        request.timeoutInterval = 6
+        request.timeoutInterval = 8
         let data: Data
         let response: URLResponse
         do {
@@ -1449,13 +1604,34 @@ actor PawbotBackend {
             throw PawbotBackendError.notRunning
         }
         if http.statusCode == 501 || http.statusCode == 503 {
-            throw PawbotBackendError.gmailNotConfigured
+            throw notConfiguredError
         }
         guard (200..<300).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw PawbotBackendError.badResponse(http.statusCode, body)
         }
-        return try JSONDecoder().decode([PawbotGmailMessage].self, from: data)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    func recentGmail(limit: Int = 5) async throws -> [PawbotGmailMessage] {
+        try await get("/api/gmail/recent", query: [URLQueryItem(name: "limit", value: "\(limit)")], notConfiguredError: .gmailNotConfigured)
+    }
+
+    func upcomingEvents(limit: Int = 5) async throws -> [PawbotCalendarEvent] {
+        try await get("/api/calendar/upcoming", query: [URLQueryItem(name: "limit", value: "\(limit)")], notConfiguredError: .calendarNotConfigured)
+    }
+
+    func scamAlerts() async throws -> [PawbotScamAlert] {
+        let response: PawbotScamAlertsResponse = try await get("/api/scam-alerts", notConfiguredError: .notRunning)
+        return response.alerts
+    }
+
+    func dismissScamAlert(id: String) async throws {
+        let url = baseURL.appendingPathComponent("/api/scam-alerts/\(id)/dismiss")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 6
+        _ = try? await URLSession.shared.data(for: request)
     }
 }
 
@@ -1743,6 +1919,158 @@ final class FocusableTextField: NSTextField {
             editor.insertionPointColor = .controlAccentColor
         }
         return result
+    }
+}
+
+enum PawbotNotifier {
+    @MainActor private static var requestedAuth = false
+
+    @MainActor
+    static func notify(title: String, body: String) {
+        let center = UNUserNotificationCenter.current()
+        if !requestedAuth {
+            requestedAuth = true
+            center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        center.add(request, withCompletionHandler: nil)
+    }
+}
+
+struct CalendarPreviewSheet: View {
+    let events: [PawbotCalendarEvent]
+    let isLoading: Bool
+    let error: String?
+    let onRefresh: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "calendar")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.blue)
+                Text("Upcoming")
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                Spacer()
+                Button(action: onRefresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .bold))
+                }
+                .buttonStyle(.plain)
+            }
+
+            if isLoading {
+                Text("Loading…")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else if let error {
+                Text(error)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if events.isEmpty {
+                Text("Nothing on the calendar.")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(events) { event in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(event.title)
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                        Text(formatStart(event.start))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        if let location = event.location, !location.isEmpty {
+                            Text("📍 \(location)")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 320)
+    }
+
+    private func formatStart(_ raw: String?) -> String {
+        guard let raw else { return "Time unknown" }
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = isoFormatter.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
+        guard let date else { return raw }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+}
+
+struct GmailPreviewSheet: View {
+    let emails: [PawbotGmailMessage]
+    let isLoading: Bool
+    let error: String?
+    let onRefresh: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "envelope.fill")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.red)
+                Text("Recent emails")
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                Spacer()
+                Button(action: onRefresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .bold))
+                }
+                .buttonStyle(.plain)
+            }
+
+            if isLoading {
+                Text("Loading…")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else if let error {
+                Text(error)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if emails.isEmpty {
+                Text("Inbox looks empty.")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(emails) { email in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(email.subject)
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .lineLimit(1)
+                        Text(email.from)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Text(email.snippet)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 360)
     }
 }
 

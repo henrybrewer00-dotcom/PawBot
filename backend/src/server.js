@@ -6,6 +6,8 @@ import { createRouter } from "./routes.js";
 import { runMedicationAgentTick } from "./domain.js";
 import { runHyperspellSyncTick } from "./hyperspellSync.js";
 import { startTensorlakeAgents } from "./tensorlakeRunner.js";
+import { startScamScanner } from "./scamScanner.js";
+import { isComposioConfigured } from "./composio.js";
 
 const app = express();
 
@@ -59,6 +61,13 @@ if (process.env.VERCEL) {
       console.error("Hyperspell sync tick failed", error);
     });
   }, config.hyperspell.syncHours * 60 * 60 * 1000);
+
+  if (isComposioConfigured()) {
+    startScamScanner();
+    console.log("Scam scanner running every 5m via Composio + Grok");
+  } else {
+    console.log("Composio not configured — scam scanner idle (set COMPOSIO_API_KEY in backend/.env)");
+  }
 }
 
 export default app;

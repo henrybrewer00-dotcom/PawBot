@@ -25,6 +25,8 @@ import {
   updateMedication
 } from "./domain.js";
 import { searchSeniorMemory } from "./nia.js";
+import { fetchGmailRecent, fetchCalendarUpcoming, isComposioConfigured } from "./composio.js";
+import { listScamAlerts, dismissScamAlert, scannerStatus } from "./scamScanner.js";
 import { createUserToken, getConnectUrl, HYPERSPELL_PROVIDERS } from "./hyperspell.js";
 import {
   normalizeHyperspellProvider,
@@ -294,45 +296,49 @@ export function createRouter(store) {
 
   router.get("/api/gmail/recent", asyncHandler(async (req, res) => {
     const limit = Math.max(1, Math.min(20, parseInt(req.query.limit ?? "5", 10)));
-    if (!process.env.INSFORGE_GMAIL_TOKEN) {
+    if (!isComposioConfigured()) {
       res.status(503).json({
-        error: "gmail_not_configured",
-        hint: "Set INSFORGE_GMAIL_TOKEN in backend/.env and wire up Insforge OAuth for Gmail."
+        error: "composio_not_configured",
+        hint: "Set COMPOSIO_API_KEY in backend/.env and connect Gmail in the Composio dashboard."
       });
       return;
     }
     try {
-      const url = `https://www.googleapis.com/gmail/v1/users/me/messages?maxResults=${limit}&q=in:inbox`;
-      const listRes = await fetch(url, {
-        headers: { Authorization: `Bearer ${process.env.INSFORGE_GMAIL_TOKEN}` }
-      });
-      if (!listRes.ok) {
-        const body = await listRes.text();
-        throw new HttpError(502, `Gmail API list failed: ${listRes.status} ${body.slice(0, 200)}`);
-      }
-      const list = await listRes.json();
-      const ids = (list.messages ?? []).map(m => m.id);
-      const messages = await Promise.all(ids.map(async id => {
-        const detail = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, {
-          headers: { Authorization: `Bearer ${process.env.INSFORGE_GMAIL_TOKEN}` }
-        });
-        if (!detail.ok) return null;
-        const m = await detail.json();
-        const headers = Object.fromEntries((m.payload?.headers ?? []).map(h => [h.name, h.value]));
-        return {
-          id,
-          from: headers.From ?? "Unknown",
-          subject: headers.Subject ?? "(no subject)",
-          snippet: m.snippet ?? "",
-          date: headers.Date ?? null
-        };
-      }));
-      res.json(messages.filter(Boolean));
+      const messages = await fetchGmailRecent(limit);
+      res.json(messages);
     } catch (err) {
-      if (err instanceof HttpError) throw err;
-      throw new HttpError(502, `Gmail fetch failed: ${err.message}`);
+      throw new HttpError(502, err.message);
     }
   }));
+
+  router.get("/api/calendar/upcoming", asyncHandler(async (req, res) => {
+    const limit = Math.max(1, Math.min(20, parseInt(req.query.limit ?? "5", 10)));
+    if (!isComposioConfigured()) {
+      res.status(503).json({
+        error: "composio_not_configured",
+        hint: "Set COMPOSIO_API_KEY in backend/.env and connect Google Calendar in the Composio dashboard."
+      });
+      return;
+    }
+    try {
+      const events = await fetchCalendarUpcoming(limit);
+      res.json(events);
+    } catch (err) {
+      throw new HttpError(502, err.message);
+    }
+  }));
+
+  router.get("/api/scam-alerts", (req, res) => {
+    res.json({
+      alerts: listScamAlerts({ activeOnly: req.query.includeDismissed !== "true" }),
+      status: scannerStatus()
+    });
+  });
+
+  router.post("/api/scam-alerts/:id/dismiss", (req, res) => {
+    const ok = dismissScamAlert(req.params.id);
+    res.json({ ok });
+  });
 
   return router;
 }
