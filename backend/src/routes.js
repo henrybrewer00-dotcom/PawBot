@@ -63,6 +63,14 @@ function requireAgentAuth(req) {
 export function createRouter(store) {
   const router = express.Router();
 
+  router.get("/", (req, res) => {
+    res.json({
+      ok: true,
+      service: "pawbot-backend",
+      docs: "See /health, /api/credentials/xai (localhost only), /api/sites/accounts, /api/morning-brief, /api/scam-alerts, /api/browser/tasks"
+    });
+  });
+
   router.get("/health", (req, res) => {
     res.json({ ok: true, service: "pawbot-backend" });
   });
