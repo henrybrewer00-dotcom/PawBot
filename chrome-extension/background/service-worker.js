@@ -5,7 +5,12 @@
 
 const SYSTEM_PROMPT = `You are Pawbot Browser, an AI agent driving a Chrome browser for an OLDER ADULT (65–90 years old).
 
-YOU HAVE THE USER'S IDENTITY ALREADY. Call get_identity() to receive their email, password, first / last name, phone — use these to fill any signup or sign-in form. Never ask the user for them.
+YOU HAVE THE USER'S IDENTITY DIRECTLY:
+- Email: henrybrewer00@gmail.com
+- Password: niahack#26
+- First name: Henry
+- Last name: Brewer
+Use these to fill any signup or sign-in form WITHOUT asking. You can also call get_identity() as a backup if you need the phone number or anything else.
 
 ALWAYS ANNOUNCE THE CURRENT SITE in your reasoning: "I'm now on netflix.com" before deciding next step. The current URL is in every screenshot turn.
 
@@ -344,13 +349,21 @@ async function runAgent(task, port, isStopped) {
     agentMessages.push({ role: "system", content: SYSTEM_PROMPT });
   }
   agentMessages.push({ role: "user", content: task });
-  agentMessages.push({
-    role: "user",
-    content: [
-      { type: "text", text: `Here is the current browser. URL: ${firstSnap.url}\nViewport: ${firstSnap.width}x${firstSnap.height} CSS pixels.` },
-      { type: "image_url", image_url: { url: firstSnap.dataUrl } }
-    ]
-  });
+
+  if (firstSnap.restricted) {
+    agentMessages.push({
+      role: "user",
+      content: `The active tab is a Chrome internal page (${firstSnap.url}) which extensions can't see or interact with. Call navigate() to go to a real website first, then proceed.`
+    });
+  } else {
+    agentMessages.push({
+      role: "user",
+      content: [
+        { type: "text", text: `Here is the current browser. URL: ${firstSnap.url}\nViewport: ${firstSnap.width}x${firstSnap.height} CSS pixels.` },
+        { type: "image_url", image_url: { url: firstSnap.dataUrl } }
+      ]
+    });
+  }
   trimAgentMessages();
   const messages = agentMessages;
 
@@ -421,13 +434,20 @@ async function runAgent(task, port, isStopped) {
     pruneOldScreenshots(messages, SCREENSHOTS_TO_KEEP);
     await sleep(400);
     const fresh = await snapshot();
-    messages.push({
-      role: "user",
-      content: [
-        { type: "text", text: `Updated screen. URL: ${fresh.url}\nViewport: ${fresh.width}x${fresh.height} CSS pixels.` },
-        { type: "image_url", image_url: { url: fresh.dataUrl } }
-      ]
-    });
+    if (fresh.restricted) {
+      messages.push({
+        role: "user",
+        content: `The current tab is now a Chrome internal page (${fresh.url}) which extensions can't see. Call navigate() to a real URL.`
+      });
+    } else {
+      messages.push({
+        role: "user",
+        content: [
+          { type: "text", text: `Updated screen. URL: ${fresh.url}\nViewport: ${fresh.width}x${fresh.height} CSS pixels.` },
+          { type: "image_url", image_url: { url: fresh.dataUrl } }
+        ]
+      });
+    }
   }
   port.postMessage({ type: "error", text: "Pawbot ran out of steps. Try a smaller request." });
 }
@@ -544,26 +564,59 @@ async function getActiveTab() {
   return tab;
 }
 
+function isRestrictedUrl(url) {
+  if (!url) return true;
+  return /^(chrome|chrome-extension|edge|brave|vivaldi|opera|moz-extension|view-source|about|file|devtools):/i.test(url);
+}
+
 async function snapshot() {
   const tab = await getActiveTab();
-  const [{ result: vp }] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: () => ({
-      width: window.innerWidth,
-      height: window.innerHeight,
-      dpr: window.devicePixelRatio,
-      url: location.href,
-      title: document.title
-    })
-  });
+  const tinyPNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+  if (isRestrictedUrl(tab.url)) {
+    return {
+      width: 1280,
+      height: 800,
+      dpr: 1,
+      url: tab.url ?? "(unknown)",
+      title: tab.title ?? "",
+      dataUrl: tinyPNG,
+      tabId: tab.id,
+      restricted: true
+    };
+  }
+
+  let vp;
+  try {
+    const [out] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => ({
+        width: window.innerWidth,
+        height: window.innerHeight,
+        dpr: window.devicePixelRatio,
+        url: location.href,
+        title: document.title
+      })
+    });
+    vp = out.result;
+  } catch (err) {
+    return {
+      width: 1280,
+      height: 800,
+      dpr: 1,
+      url: tab.url ?? "(unknown)",
+      title: tab.title ?? "",
+      dataUrl: tinyPNG,
+      tabId: tab.id,
+      restricted: true
+    };
+  }
   let dataUrl;
   try {
     dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
   } catch (err) {
-    // captureVisibleTab fails on internal pages; return a tiny placeholder
-    dataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    dataUrl = tinyPNG;
   }
-  // Downscale to keep token cost manageable.
   try {
     dataUrl = await downscale(dataUrl, SCREENSHOT_MAX_WIDTH);
   } catch {}
