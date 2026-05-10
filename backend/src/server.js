@@ -49,19 +49,23 @@ if (process.env.VERCEL) {
     startTensorlakeAgents().catch((error) => {
       console.error("Tensorlake agent launch failed", error);
     });
-  } else {
+  } else if (config.insforge.url && config.insforge.apiKey) {
     setInterval(() => {
       runMedicationAgentTick(store).catch((error) => {
         console.error("Medication agent tick failed", error);
       });
     }, config.agent.pollSeconds * 1000);
+  } else {
+    console.log("Medication agent idle (no INSFORGE_URL/INSFORGE_API_KEY).");
   }
 
-  setInterval(() => {
-    runHyperspellSyncTick(store).catch((error) => {
-      console.error("Hyperspell sync tick failed", error);
-    });
-  }, config.hyperspell.syncHours * 60 * 60 * 1000);
+  if (config.hyperspell.apiKey) {
+    setInterval(() => {
+      runHyperspellSyncTick(store).catch((error) => {
+        console.error("Hyperspell sync tick failed", error);
+      });
+    }, config.hyperspell.syncHours * 60 * 60 * 1000);
+  }
 
   if (isComposioConfigured()) {
     startScamScanner();
