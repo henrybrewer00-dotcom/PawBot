@@ -5,6 +5,18 @@ const seenEmailIds = new Set();
 const scamAlerts = [];
 const MAX_ALERTS = 100;
 const SCAN_INTERVAL_MS = 5 * 60 * 1000;
+const HIGH_CONFIDENCE_SCAM_RULES = [
+  { pattern: /\bfree\s+cash\b/i, reason: "The email promises free cash, which is a common scam hook." },
+  { pattern: /\bfree\s+money\b/i, reason: "The email promises free money, which is a common scam hook." },
+  { pattern: /\bcash\s+prize\b/i, reason: "The email mentions a cash prize, which is often used in scam messages." },
+  { pattern: /\byou\s+(have\s+)?won\b/i, reason: "The email says the recipient won something unexpectedly." },
+  { pattern: /\bclaim\s+(your\s+)?(cash|prize|reward|money)\b/i, reason: "The email asks the recipient to claim money or a prize." },
+  { pattern: /\bgift\s+card\b/i, reason: "The email mentions gift cards, which are often used in scams." },
+  { pattern: /\bwire\s+transfer\b/i, reason: "The email asks about a wire transfer, which can be risky." },
+  { pattern: /\bverify\s+your\s+account\b/i, reason: "The email asks for account verification, which can be phishing." },
+  { pattern: /\bunusual\s+login\b/i, reason: "The email mentions an unusual login and may be phishing." },
+  { pattern: /\bpassword\b/i, reason: "The email mentions a password and may be trying to steal credentials." }
+];
 
 let scannerStarted = false;
 let lastScanAt = null;
@@ -27,7 +39,35 @@ export function scannerStatus() {
   return { started: scannerStarted, lastScanAt, lastScanError, alertsTracked: scamAlerts.length };
 }
 
-async function scoreEmailForScam(message) {
+function emailText(message) {
+  return [
+    message.from,
+    message.subject,
+    message.snippet
+  ].filter(Boolean).join("\n");
+}
+
+export function deterministicEmailScamScore(message) {
+  const text = emailText(message);
+  const match = HIGH_CONFIDENCE_SCAM_RULES.find((rule) => rule.pattern.test(text));
+  if (!match) return null;
+  return {
+    verdict: "SCAM",
+    reason: match.reason
+  };
+}
+
+export async function scoreEmailForScam(message, { allowLlm = true } = {}) {
+  const deterministic = deterministicEmailScamScore(message);
+  if (deterministic) return deterministic;
+
+  if (!allowLlm || !process.env.XAI_API_KEY) {
+    return {
+      verdict: "SAFE",
+      reason: "No high-confidence scam phrase was found."
+    };
+  }
+
   const prompt = [
     "You are a scam-detection helper for older adults. Decide if the email below is suspicious (phishing, fraud, scam, gift card scam, fake support, urgency manipulation, romance scam, prize/lottery, malicious attachment, impersonation).",
     "Reply with EXACTLY one line in this shape:",
@@ -55,10 +95,6 @@ async function scoreEmailForScam(message) {
 async function runScanOnce() {
   if (!isComposioConfigured()) {
     lastScanError = "composio_not_configured";
-    return;
-  }
-  if (!process.env.XAI_API_KEY) {
-    lastScanError = "xai_not_configured";
     return;
   }
   try {

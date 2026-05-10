@@ -1,4 +1,5 @@
 const COMPOSIO_BASE = process.env.COMPOSIO_BASE_URL ?? "https://backend.composio.dev/api/v3";
+const US_HOLIDAY_CALENDAR_ID = "en.usa#holiday@group.v.calendar.google.com";
 
 export function isComposioConfigured() {
   return Boolean(process.env.COMPOSIO_API_KEY);
@@ -40,6 +41,7 @@ export async function composioExecute(actionName, input = {}, opts = {}) {
 
 function findArray(obj, keys, depth = 0) {
   if (!obj || typeof obj !== "object" || depth > 6) return null;
+  if (Array.isArray(obj)) return obj;
   for (const k of keys) {
     if (Array.isArray(obj[k])) return obj[k];
   }
@@ -91,6 +93,12 @@ function asNullableString(value) {
   return asString(value, "") || null;
 }
 
+function upcomingTimeMin() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  return start.toISOString();
+}
+
 export async function fetchGmailRecent(limit = 5) {
   const result = await composioExecute("GMAIL_FETCH_EMAILS", {
     max_results: limit,
@@ -108,23 +116,60 @@ export async function fetchGmailRecent(limit = 5) {
   return mapped;
 }
 
-export async function fetchCalendarUpcoming(limit = 5) {
-  const result = await composioExecute("GOOGLECALENDAR_FIND_EVENT", {
-    calendar_id: "primary",
-    max_results: limit,
-    single_events: true,
-    order_by: "startTime",
-    timeMin: new Date().toISOString()
-  });
-  const list = findArray(result, ["items", "events", "results", "eventList"]) ?? [];
-  return list.map((e) => ({
+function mapCalendarEvent(e, source = "google_calendar") {
+  const title = asString(pickField(e, ["summary", "title", "eventName", "event_name"]), "(no title)");
+  return {
     id: asString(pickField(e, ["id", "eventId", "event_id"]), ""),
-    title: asString(pickField(e, ["summary", "title", "eventName", "event_name"]), "(no title)"),
+    title,
     start: asNullableString(pickField(e, ["start.dateTime", "start.date", "startTime", "start_time", "start"])),
     end: asNullableString(pickField(e, ["end.dateTime", "end.date", "endTime", "end_time", "end"])),
     location: asNullableString(pickField(e, ["location", "venue"])),
-    description: asNullableString(pickField(e, ["description", "notes"]))
-  })).filter((e) => e.id || e.title !== "(no title)");
+    description: asNullableString(pickField(e, ["description", "notes"])),
+    source,
+    eventType: source === "google_holiday" ? "holiday" : "calendar",
+    isHoliday: source === "google_holiday"
+  };
+}
+
+async function fetchCalendarEventsFrom(calendarId, limit, source) {
+  const result = await composioExecute("GOOGLECALENDAR_FIND_EVENT", {
+    calendar_id: calendarId,
+    max_results: limit,
+    single_events: true,
+    order_by: "startTime",
+    timeMin: upcomingTimeMin()
+  });
+  const list = findArray(result, ["items", "events", "results", "eventList", "event_data"]) ?? [];
+  return list.map((e) => mapCalendarEvent(e, source)).filter((e) => e.id || e.title !== "(no title)");
+}
+
+function eventTime(event) {
+  const raw = event.start ?? event.end;
+  if (!raw) return Number.MAX_SAFE_INTEGER;
+  const time = new Date(raw).getTime();
+  return Number.isNaN(time) ? Number.MAX_SAFE_INTEGER : time;
+}
+
+function dedupeCalendarEvents(events) {
+  const seen = new Set();
+  return events.filter((event) => {
+    const key = `${event.source}:${event.id || event.title}:${event.start || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export async function fetchCalendarUpcoming(limit = 5) {
+  const perCalendarLimit = Math.max(limit, 10);
+  const [primary, holidays] = await Promise.all([
+    fetchCalendarEventsFrom("primary", perCalendarLimit, "google_calendar").catch(() => []),
+    fetchCalendarEventsFrom(US_HOLIDAY_CALENDAR_ID, perCalendarLimit, "google_holiday").catch(() => [])
+  ]);
+
+  return dedupeCalendarEvents([...primary, ...holidays])
+    .sort((a, b) => eventTime(a) - eventTime(b))
+    .slice(0, limit);
 }
 
 export async function probeRaw(action, input) {

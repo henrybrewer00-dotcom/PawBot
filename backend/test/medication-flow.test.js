@@ -16,6 +16,7 @@ import {
   normalizeLookupIdentifier,
   normalizePhone
 } from "../src/identity.js";
+import { deterministicEmailScamScore } from "../src/scamScanner.js";
 
 const emptyState = () => ({
   users: [],
@@ -195,4 +196,15 @@ test("senior personal info saves public metadata and agent-readable credentials"
   assert.equal(saved.hasPassword, true);
   assert.equal(publicInfo.password, undefined);
   assert.equal(agentInfo.password, "demo-password");
+});
+
+test("free cash email is deterministically flagged as scam", () => {
+  const score = deterministicEmailScamScore({
+    from: "promo@example.com",
+    subject: "FREE CASH",
+    snippet: "Click now to claim your free cash reward."
+  });
+
+  assert.equal(score.verdict, "SCAM");
+  assert.match(score.reason, /free cash/i);
 });

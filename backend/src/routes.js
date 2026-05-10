@@ -30,7 +30,7 @@ import {
 } from "./domain.js";
 import { searchSeniorMemory } from "./nia.js";
 import { fetchGmailRecent, fetchCalendarUpcoming, isComposioConfigured, probeRaw } from "./composio.js";
-import { listScamAlerts, dismissScamAlert, scannerStatus } from "./scamScanner.js";
+import { listScamAlerts, dismissScamAlert, scannerStatus, scoreEmailForScam } from "./scamScanner.js";
 import { generateMorningBrief, getCachedMorningBrief, listMorningBriefs } from "./morningBrief.js";
 import { enqueueTask as enqueueBrowserTask, claimNextTask as claimNextBrowserTask, recordResult as recordBrowserResult, getResult as getBrowserResult, waitForResult as waitForBrowserResult } from "./browserBridge.js";
 import { listSiteAccounts, getSiteAccount, recordSiteAccount, deleteSiteAccount } from "./siteAccounts.js";
@@ -196,6 +196,51 @@ export function createRouter(store) {
 
   router.get("/api/seniors/:seniorId/scam-alerts", asyncHandler(async (req, res) => {
     res.json(await getScamAlertsForSenior(store, req.params.seniorId));
+  }));
+
+  router.post("/api/seniors/:seniorId/gmail/scan-scams", asyncHandler(async (req, res) => {
+    const limit = Math.max(1, Math.min(20, parseInt(req.body?.limit ?? req.query.limit ?? "10", 10)));
+    if (!isComposioConfigured()) {
+      res.status(503).json({
+        error: "composio_not_configured",
+        hint: "Set COMPOSIO_API_KEY in backend/.env and connect Gmail in the Composio dashboard."
+      });
+      return;
+    }
+
+    const existingAlerts = await getScamAlertsForSenior(store, req.params.seniorId);
+    const messages = await fetchGmailRecent(limit);
+    const created = [];
+
+    for (const message of messages) {
+      const { verdict, reason } = await scoreEmailForScam(message, { allowLlm: false });
+      if (verdict !== "SCAM" && verdict !== "SUSPICIOUS") continue;
+
+      const summary = `${message.subject}: ${reason || message.snippet || "Suspicious email detected."}`;
+      const duplicate = existingAlerts.some((alert) => (
+        alert.source === message.from &&
+        alert.summary === summary
+      )) || created.some((alert) => (
+        alert.source === message.from &&
+        alert.summary === summary
+      ));
+      if (duplicate) continue;
+
+      created.push(await createScamAlert(store, {
+        seniorId: req.params.seniorId,
+        source: message.from,
+        riskLevel: verdict === "SCAM" ? "high" : "medium",
+        summary,
+        actionTaken: "logged_from_gmail_scan",
+        caretakerNotified: false
+      }));
+    }
+
+    res.json({
+      scanned: messages.length,
+      created: created.length,
+      alerts: created
+    });
   }));
 
   router.get("/api/seniors/:seniorId/agent-logs", asyncHandler(async (req, res) => {
