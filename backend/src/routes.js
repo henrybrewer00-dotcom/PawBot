@@ -33,6 +33,7 @@ import { fetchGmailRecent, fetchCalendarUpcoming, isComposioConfigured, probeRaw
 import { listScamAlerts, dismissScamAlert, scannerStatus } from "./scamScanner.js";
 import { generateMorningBrief, getCachedMorningBrief, listMorningBriefs } from "./morningBrief.js";
 import { enqueueTask as enqueueBrowserTask, claimNextTask as claimNextBrowserTask, recordResult as recordBrowserResult, getResult as getBrowserResult, waitForResult as waitForBrowserResult } from "./browserBridge.js";
+import { listSiteAccounts, getSiteAccount, recordSiteAccount, deleteSiteAccount } from "./siteAccounts.js";
 import { createUserToken, getConnectUrl, HYPERSPELL_PROVIDERS } from "./hyperspell.js";
 import {
   normalizeHyperspellProvider,
@@ -453,6 +454,56 @@ export function createRouter(store) {
   router.get("/api/browser/tasks/:id/wait", asyncHandler(async (req, res) => {
     const entry = await waitForBrowserResult(req.params.id, 120_000);
     res.json(entry);
+  }));
+
+  router.get("/api/credentials/identity", asyncHandler(async (req, res) => {
+    const host = req.hostname || "";
+    const isLocal = host === "localhost" || host === "127.0.0.1" || host.startsWith("::1") || host === "[::1]";
+    if (!isLocal) {
+      res.status(403).json({ error: "identity endpoint only available on localhost" });
+      return;
+    }
+    let email = process.env.PAWBOT_USER_EMAIL ?? null;
+    let password = process.env.PAWBOT_USER_PASSWORD ?? null;
+    let firstName = process.env.PAWBOT_USER_FIRST_NAME ?? null;
+    let lastName = process.env.PAWBOT_USER_LAST_NAME ?? null;
+    let phone = process.env.PAWBOT_USER_PHONE ?? null;
+    const seniorId = process.env.PAWBOT_DEFAULT_SENIOR_ID ?? null;
+    if (seniorId) {
+      try {
+        const info = await getSeniorPersonalInfo(store, seniorId, { includePassword: true });
+        email = email ?? info?.email ?? null;
+        password = password ?? info?.password ?? null;
+        firstName = firstName ?? info?.firstName ?? null;
+        lastName = lastName ?? info?.lastName ?? null;
+        phone = phone ?? info?.phone ?? null;
+      } catch {}
+    }
+    res.json({ email, password, firstName, lastName, phone, seniorId });
+  }));
+
+  router.get("/api/sites/accounts", asyncHandler(async (req, res) => {
+    res.json({ accounts: await listSiteAccounts() });
+  }));
+
+  router.get("/api/sites/accounts/:domain", asyncHandler(async (req, res) => {
+    const account = await getSiteAccount(req.params.domain);
+    res.json({ account });
+  }));
+
+  router.post("/api/sites/accounts", asyncHandler(async (req, res) => {
+    const { domain, email, status, notes } = req.body ?? {};
+    if (!domain) {
+      res.status(400).json({ error: "domain is required" });
+      return;
+    }
+    const entry = await recordSiteAccount({ domain, email, status, notes });
+    res.status(201).json({ account: entry });
+  }));
+
+  router.delete("/api/sites/accounts/:domain", asyncHandler(async (req, res) => {
+    const ok = await deleteSiteAccount(req.params.domain);
+    res.json({ ok });
   }));
 
   router.get("/api/credentials/xai", (req, res) => {

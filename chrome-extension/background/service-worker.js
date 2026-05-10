@@ -5,6 +5,12 @@
 
 const SYSTEM_PROMPT = `You are Pawbot Browser, an AI agent driving a Chrome browser for an OLDER ADULT (65–90 years old).
 
+YOU HAVE THE USER'S IDENTITY ALREADY. Call get_identity() to receive their email, password, first / last name, phone — use these to fill any signup or sign-in form. Never ask the user for them.
+
+ALWAYS ANNOUNCE THE CURRENT SITE in your reasoning: "I'm now on netflix.com" before deciding next step. The current URL is in every screenshot turn.
+
+ACCOUNT MEMORY: For any login/signup page, FIRST call get_existing_account(domain) — if it returns an account, sign in with the stored email + password. If not, sign up using get_identity, then call record_account({domain, email}) once the account is created. This way the senior never has to track which sites they're on.
+
 You SEE screenshots of the visible browser tab on every turn. Each user turn after the first contains the latest screenshot and the viewport size in CSS pixels.
 
 You DRIVE the browser through tools that take pixel coordinates:
@@ -149,6 +155,42 @@ const TOOLS = [
   {
     type: "function",
     function: {
+      name: "get_identity",
+      description: "Get the user's saved identity (email, password, first/last name, phone) from the Pawbot backend. Use this to fill any signup or sign-in form. Never ask the user for these directly.",
+      parameters: { type: "object", properties: {} }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_existing_account",
+      description: "Check whether the user already has an account on a given site. Returns the stored email + status, or null if no account is on file. Always call this before deciding to sign up vs sign in.",
+      parameters: {
+        type: "object",
+        properties: { domain: { type: "string", description: "Domain like netflix.com" } },
+        required: ["domain"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "record_account",
+      description: "Record that the user now has an account on a site. Call this AFTER a successful signup so future sign-in flows can reuse it.",
+      parameters: {
+        type: "object",
+        properties: {
+          domain: { type: "string" },
+          email: { type: "string" },
+          notes: { type: "string", description: "Anything worth noting (paid plan, family share, etc.)" }
+        },
+        required: ["domain"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "done",
       description: "Finish — send a short, plain-language message to the user. Use this whenever the task is done OR you need user input (e.g. password).",
       parameters: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] }
@@ -184,15 +226,40 @@ async function loadXaiKey() {
 }
 
 let activeRun = null;
-// Persist across Go presses so the agent remembers prior tasks in the
-// same browsing session. Reset via popup's "Clear" button or when the
-// service worker is restarted by Chrome.
+// Persist across Go presses AND service-worker restarts so the agent
+// remembers prior tasks in the same browsing session. Stored in
+// chrome.storage.session which survives worker termination but
+// is wiped when Chrome itself closes. Reset via popup's "Clear" button.
 let agentMessages = [];
+let agentMessagesLoaded = false;
 let bridgeRunning = false;
 
-chrome.runtime.onInstalled.addListener(() => startBridgePoller());
-chrome.runtime.onStartup.addListener(() => startBridgePoller());
+async function loadAgentMessages() {
+  if (agentMessagesLoaded) return;
+  try {
+    const stored = await chrome.storage.session.get(["agentMessages"]);
+    if (Array.isArray(stored?.agentMessages)) {
+      agentMessages = stored.agentMessages;
+    }
+  } catch {}
+  agentMessagesLoaded = true;
+}
+
+async function saveAgentMessages() {
+  try {
+    await chrome.storage.session.set({ agentMessages });
+  } catch {}
+}
+
+async function clearAgentMessages() {
+  agentMessages = [];
+  try { await chrome.storage.session.remove("agentMessages"); } catch {}
+}
+
+chrome.runtime.onInstalled.addListener(() => { loadAgentMessages(); startBridgePoller(); });
+chrome.runtime.onStartup.addListener(() => { loadAgentMessages(); startBridgePoller(); });
 // Best-effort kick on every script load (worker may have just woken up).
+loadAgentMessages();
 startBridgePoller();
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -214,7 +281,7 @@ chrome.runtime.onConnect.addListener((port) => {
     } else if (msg.type === "stop") {
       stopped = true;
     } else if (msg.type === "clear") {
-      agentMessages = [];
+      await clearAgentMessages();
       port.postMessage({ type: "result", text: "Conversation cleared." });
     }
   });
@@ -234,6 +301,7 @@ async function runAgent(task, port, isStopped) {
   await sleep(400);
   const firstSnap = await snapshot();
 
+  await loadAgentMessages();
   if (agentMessages.length === 0) {
     agentMessages.push({ role: "system", content: SYSTEM_PROMPT });
   }
@@ -259,6 +327,8 @@ async function runAgent(task, port, isStopped) {
 
     if (!response.toolCalls?.length) {
       const final = (response.content || "").trim() || "Done.";
+      messages.push({ role: "assistant", content: final });
+      await saveAgentMessages();
       port.postMessage({ type: "done", text: final });
       return;
     }
@@ -302,6 +372,8 @@ async function runAgent(task, port, isStopped) {
     }
 
     if (earlyExit) {
+      messages.push({ role: "assistant", content: exitMessage });
+      await saveAgentMessages();
       port.postMessage({ type: "done", text: exitMessage });
       return;
     }
@@ -525,6 +597,9 @@ async function executeTool(name, args, xaiKey) {
     case "read_page": return await toolReadPage();
     case "inject_css": return await toolInjectCSS(args.css || "");
     case "make_text_bigger": return await toolMakeTextBigger(args.factor ?? 1.4);
+    case "get_identity": return await toolGetIdentity();
+    case "get_existing_account": return await toolGetExistingAccount(args.domain || "");
+    case "record_account": return await toolRecordAccount(args);
     case "done": return args.answer || "Done.";
     default: return `Unknown tool: ${name}`;
   }
@@ -706,6 +781,54 @@ async function toolMakeTextBigger(factor) {
   const f = Math.max(1.0, Math.min(3.0, Number(factor) || 1.4));
   const css = `html { font-size: ${Math.round(f * 100)}% !important; } body, p, li, a, span, div, h1, h2, h3, h4, h5, h6, button, input, label { line-height: 1.5 !important; }`;
   return await toolInjectCSS(css);
+}
+
+async function toolGetIdentity() {
+  try {
+    const res = await fetch(`${PAWBOT_BACKEND_URL}/api/credentials/identity`, { cache: "no-store" });
+    if (!res.ok) return `Identity unavailable (HTTP ${res.status}). Check backend/.env for PAWBOT_USER_EMAIL / PAWBOT_USER_PASSWORD.`;
+    const data = await res.json();
+    if (!data?.email && !data?.password) return "No identity is configured. Set PAWBOT_USER_EMAIL and PAWBOT_USER_PASSWORD in backend/.env.";
+    return JSON.stringify({
+      email: data.email,
+      password: data.password,
+      firstName: data.firstName,
+      lastName: data.lastName,
+      phone: data.phone
+    });
+  } catch (e) {
+    return `Identity fetch failed: ${e?.message ?? e}`;
+  }
+}
+
+async function toolGetExistingAccount(domain) {
+  if (!domain) return "domain is required";
+  try {
+    const res = await fetch(`${PAWBOT_BACKEND_URL}/api/sites/accounts/${encodeURIComponent(domain)}`, { cache: "no-store" });
+    if (!res.ok) return `Lookup failed (HTTP ${res.status})`;
+    const data = await res.json();
+    if (!data?.account) return "null";
+    return JSON.stringify(data.account);
+  } catch (e) {
+    return `Lookup failed: ${e?.message ?? e}`;
+  }
+}
+
+async function toolRecordAccount(args) {
+  const domain = args?.domain;
+  if (!domain) return "domain is required";
+  try {
+    const res = await fetch(`${PAWBOT_BACKEND_URL}/api/sites/accounts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain, email: args.email, notes: args.notes })
+    });
+    if (!res.ok) return `Record failed (HTTP ${res.status})`;
+    const data = await res.json();
+    return JSON.stringify(data.account);
+  } catch (e) {
+    return `Record failed: ${e?.message ?? e}`;
+  }
 }
 
 async function toolGetEmailCode(fromContains) {
