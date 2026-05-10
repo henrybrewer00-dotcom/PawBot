@@ -18,8 +18,9 @@ ACCOUNT MEMORY: For any login/signup page, FIRST call get_existing_account(domai
 
 You SEE screenshots of the visible browser tab on every turn. Each user turn after the first contains the latest screenshot and the viewport size in CSS pixels.
 
-You DRIVE the browser through tools that take pixel coordinates:
-- click(x, y) — clicks at (x, y) in CSS pixels of the viewport in the screenshot.
+You DRIVE the browser through tools. PREFER click_text over click(x,y) whenever the target has visible label text — it's faster and more accurate.
+- click_text(text) — click an element by its visible text ("Sign In", "Continue", "Add to Cart"). USE THIS FIRST.
+- click(x, y) — clicks at (x, y) in CSS pixels of the viewport. Only use when there's no readable text (icons, images). Screenshot is at 1:1 CSS pixel scale, so image coords map directly.
 - type(text, submit) — types into whatever field is currently focused (click first if needed).
 - key_press(key) — presses Enter, Tab, Escape, ArrowDown, etc.
 - scroll(direction, amount) — scrolls up / down / top / bottom.
@@ -45,7 +46,7 @@ const TOOLS = [
     type: "function",
     function: {
       name: "click",
-      description: "Click at the given x,y in CSS pixels of the visible viewport. The viewport size is given each turn.",
+      description: "Click at the given x,y in CSS pixels of the visible viewport. The viewport size is given each turn. The screenshot you see is rendered at exact viewport CSS scale (1 image px = 1 CSS px), so coordinates you read off the image map directly to clicks.",
       parameters: {
         type: "object",
         properties: {
@@ -53,6 +54,21 @@ const TOOLS = [
           y: { type: "number", description: "Y coordinate in CSS pixels" }
         },
         required: ["x", "y"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "click_text",
+      description: "Preferred for buttons / links: click an element by its visible text. Faster and more reliable than pixel coordinates. Use when the element shows readable label text (e.g. 'Sign In', 'Continue', 'Add to Cart').",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "Exact or near-exact visible text (case-insensitive)" },
+          tag: { type: "string", description: "Optional tag filter: button, a, input, label" }
+        },
+        required: ["text"]
       }
     }
   },
@@ -206,8 +222,8 @@ const TOOLS = [
 const VISION_MODEL = "grok-4-0709";
 const FALLBACK_MODELS = ["grok-4-fast-non-reasoning", "grok-4-0709"];
 const MAX_ITERATIONS = 30;
-const SCREENSHOT_MAX_WIDTH = 1280;
-const SCREENSHOTS_TO_KEEP = 2; // images cost tokens, prune older ones
+const SCREENSHOT_MAX_WIDTH = 1024;
+const SCREENSHOTS_TO_KEEP = 1; // only the latest screenshot is needed; older ones get text breadcrumbs
 
 const PAWBOT_BACKEND_URL = "http://localhost:4000";
 let cachedXaiKey = null;
@@ -613,12 +629,16 @@ async function snapshot() {
   }
   let dataUrl;
   try {
-    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 65 });
   } catch (err) {
     dataUrl = tinyPNG;
   }
+  // Downscale so image pixels match viewport CSS pixels exactly (capped to
+  // SCREENSHOT_MAX_WIDTH for cost). This makes Grok's pixel coordinates land
+  // on the right element via elementFromPoint without any scaling math.
+  const targetWidth = Math.min(vp.width, SCREENSHOT_MAX_WIDTH);
   try {
-    dataUrl = await downscale(dataUrl, SCREENSHOT_MAX_WIDTH);
+    dataUrl = await downscale(dataUrl, targetWidth);
   } catch {}
   return { ...vp, dataUrl, tabId: tab.id };
 }
@@ -651,8 +671,8 @@ async function callGrok(apiKey, messages, tools) {
       const body = {
         model,
         messages,
-        temperature: 0.2,
-        max_tokens: 800
+        temperature: 0.1,
+        max_tokens: 500
       };
       if (tools?.length) {
         body.tools = tools;
@@ -689,6 +709,7 @@ async function callGrok(apiKey, messages, tools) {
 async function executeTool(name, args, xaiKey) {
   switch (name) {
     case "click": return await toolClick(args.x, args.y);
+    case "click_text": return await toolClickText(args.text || "", args.tag);
     case "type": return await toolType(args.text, args.submit === true);
     case "key_press": return await toolKeyPress(args.key);
     case "scroll": return await toolScroll(args.direction || "down", args.amount ?? 0.8);
@@ -749,6 +770,52 @@ async function toolClick(x, y) {
   });
   await sleep(700);
   if (!result?.ok) return result?.error ?? "Click missed.";
+  return `Clicked <${result.tag}> "${result.label}".`;
+}
+
+async function toolClickText(text, tag) {
+  if (!text) return "text is required";
+  const tab = await getActiveTab();
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (needle, tagFilter) => {
+      const lower = needle.toLowerCase();
+      const tagsToScan = tagFilter
+        ? [tagFilter.toLowerCase()]
+        : ["button", "a", "[role='button']", "input[type='submit']", "input[type='button']", "label", "div[role='button']"];
+      const selector = tagsToScan.join(", ");
+      const visibleAndMatches = (el) => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return false;
+        const label = (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().toLowerCase();
+        return label.includes(lower);
+      };
+      const matches = Array.from(document.querySelectorAll(selector)).filter(visibleAndMatches);
+      if (matches.length === 0) {
+        // Loose fallback — any element whose innerText contains the needle
+        const looseMatches = Array.from(document.querySelectorAll("*"))
+          .filter((el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0 && (el.innerText || "").trim().toLowerCase() === lower;
+          });
+        if (looseMatches.length === 0) return { ok: false, error: `No element with visible text "${needle}"` };
+        const target = looseMatches[0];
+        target.scrollIntoView({ block: "center" });
+        target.click();
+        return { ok: true, tag: target.tagName.toLowerCase(), label: (target.innerText || "").trim().slice(0, 60) };
+      }
+      // Prefer shortest label match (most specific)
+      matches.sort((a, b) => (a.innerText || "").length - (b.innerText || "").length);
+      const target = matches[0];
+      target.scrollIntoView({ block: "center" });
+      if (typeof target.focus === "function") target.focus();
+      target.click();
+      return { ok: true, tag: target.tagName.toLowerCase(), label: (target.innerText || target.value || "").trim().slice(0, 60) };
+    },
+    args: [text, tag]
+  });
+  await sleep(700);
+  if (!result?.ok) return result?.error ?? "click_text failed";
   return `Clicked <${result.tag}> "${result.label}".`;
 }
 
