@@ -10,24 +10,23 @@ const bridgeDot = document.getElementById("bridge-dot");
 const bridgeText = document.getElementById("bridge-text");
 
 async function updateBridgeStatus() {
-  chrome.runtime.sendMessage({ type: "pawbot_bridge_status" }, (resp) => {
-    if (chrome.runtime.lastError || !resp) {
-      bridgeDot.className = "bridge-dot bad";
-      bridgeText.textContent = "Service worker asleep — try again";
-      return;
-    }
-    if (resp.connected && resp.bridgeRunning) {
+  // Always wake / kick the worker first so the long-poll resumes.
+  try { chrome.runtime.sendMessage({ type: "pawbot_kick_bridge" }, () => void chrome.runtime.lastError); } catch {}
+
+  // Source of truth = the backend itself.
+  try {
+    const res = await fetch("http://localhost:4000/health", { cache: "no-store" });
+    if (res.ok) {
       bridgeDot.className = "bridge-dot ok";
       bridgeText.textContent = "Connected to Pawbot app";
-    } else if (resp.bridgeRunning) {
-      bridgeDot.className = "bridge-dot bad";
-      bridgeText.textContent = `Backend unreachable: ${resp.lastError ?? "no response"}`;
-    } else {
-      bridgeDot.className = "bridge-dot bad";
-      bridgeText.textContent = "Bridge not running — kicking it…";
-      chrome.runtime.sendMessage({ type: "pawbot_kick_bridge" });
+      return;
     }
-  });
+    bridgeDot.className = "bridge-dot bad";
+    bridgeText.textContent = `Backend HTTP ${res.status}`;
+  } catch {
+    bridgeDot.className = "bridge-dot bad";
+    bridgeText.textContent = "Backend unreachable — run cd backend && npm run dev";
+  }
 }
 updateBridgeStatus();
 setInterval(updateBridgeStatus, 3000);
