@@ -375,7 +375,7 @@ async function runAgent(task, port, isStopped) {
     agentMessages.push({
       role: "user",
       content: [
-        { type: "text", text: `Here is the current browser. URL: ${firstSnap.url}\nViewport: ${firstSnap.width}x${firstSnap.height} CSS pixels.` },
+        { type: "text", text: buildSnapshotText(firstSnap, "current browser") },
         { type: "image_url", image_url: { url: firstSnap.dataUrl } }
       ]
     });
@@ -459,7 +459,7 @@ async function runAgent(task, port, isStopped) {
       messages.push({
         role: "user",
         content: [
-          { type: "text", text: `Updated screen. URL: ${fresh.url}\nViewport: ${fresh.width}x${fresh.height} CSS pixels.` },
+          { type: "text", text: buildSnapshotText(fresh, "updated browser") },
           { type: "image_url", image_url: { url: fresh.dataUrl } }
         ]
       });
@@ -603,18 +603,47 @@ async function snapshot() {
   }
 
   let vp;
+  let interactables = [];
   try {
     const [out] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => ({
-        width: window.innerWidth,
-        height: window.innerHeight,
-        dpr: window.devicePixelRatio,
-        url: location.href,
-        title: document.title
-      })
+      func: () => {
+        const grab = (el) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 4 || rect.height < 4) return null;
+          if (rect.bottom < 0 || rect.top > window.innerHeight) return null;
+          if (rect.right < 0 || rect.left > window.innerWidth) return null;
+          const label = (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 60);
+          return {
+            tag: el.tagName.toLowerCase(),
+            type: el.type || null,
+            label,
+            x: Math.round(rect.left + rect.width / 2),
+            y: Math.round(rect.top + rect.height / 2)
+          };
+        };
+        const list = [];
+        const seen = new Set();
+        document.querySelectorAll("a, button, [role='button'], input, textarea, select, label").forEach((el) => {
+          const e = grab(el);
+          if (!e) return;
+          const sig = `${e.tag}|${e.type}|${e.label}|${e.x},${e.y}`;
+          if (seen.has(sig)) return;
+          seen.add(sig);
+          list.push(e);
+        });
+        return {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          dpr: window.devicePixelRatio,
+          url: location.href,
+          title: document.title,
+          interactables: list.slice(0, 40)
+        };
+      }
     });
     vp = out.result;
+    interactables = vp.interactables ?? [];
   } catch (err) {
     return {
       width: 1280,
@@ -633,20 +662,43 @@ async function snapshot() {
   } catch (err) {
     dataUrl = tinyPNG;
   }
-  // Downscale so image pixels match viewport CSS pixels exactly (capped to
-  // SCREENSHOT_MAX_WIDTH for cost). This makes Grok's pixel coordinates land
-  // on the right element via elementFromPoint without any scaling math.
-  const targetWidth = Math.min(vp.width, SCREENSHOT_MAX_WIDTH);
+  let imgWidth = vp.width * (vp.dpr || 1);
+  let imgHeight = vp.height * (vp.dpr || 1);
   try {
-    dataUrl = await downscale(dataUrl, targetWidth);
+    const out = await downscale(dataUrl, SCREENSHOT_MAX_WIDTH);
+    dataUrl = out.dataUrl;
+    imgWidth = out.width;
+    imgHeight = out.height;
   } catch {}
-  return { ...vp, dataUrl, tabId: tab.id };
+  lastSnapDims = { imgWidth, imgHeight, cssWidth: vp.width, cssHeight: vp.height };
+  return { ...vp, dataUrl, tabId: tab.id, imgWidth, imgHeight, interactables };
+}
+
+let lastSnapDims = null;
+
+function buildSnapshotText(snap, label = "browser") {
+  const lines = [
+    `Here is the ${label}.`,
+    `URL: ${snap.url}`,
+    `Viewport: ${snap.width}x${snap.height} CSS pixels. Image: ${snap.imgWidth}x${snap.imgHeight} px.`
+  ];
+  if (Array.isArray(snap.interactables) && snap.interactables.length > 0) {
+    lines.push("");
+    lines.push("Interactable elements (use click_text(label) — preferred — or click(x,y) at the listed image coords):");
+    for (const e of snap.interactables) {
+      const labelTxt = e.label ? `"${e.label}"` : "";
+      lines.push(`- <${e.tag}${e.type ? ` type=${e.type}` : ""}> ${labelTxt} @ (${e.x},${e.y})`);
+    }
+  }
+  return lines.join("\n");
 }
 
 async function downscale(dataUrl, maxWidth) {
   const blob = await (await fetch(dataUrl)).blob();
   const bitmap = await createImageBitmap(blob);
-  if (bitmap.width <= maxWidth) return dataUrl;
+  if (bitmap.width <= maxWidth) {
+    return { dataUrl, width: bitmap.width, height: bitmap.height };
+  }
   const scale = maxWidth / bitmap.width;
   const w = Math.round(bitmap.width * scale);
   const h = Math.round(bitmap.height * scale);
@@ -657,7 +709,7 @@ async function downscale(dataUrl, maxWidth) {
   const buf = new Uint8Array(await out.arrayBuffer());
   let bin = "";
   for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
-  return "data:image/jpeg;base64," + btoa(bin);
+  return { dataUrl: "data:image/jpeg;base64," + btoa(bin), width: w, height: h };
 }
 
 // =============================
@@ -752,6 +804,16 @@ function shortPreview(s) {
 }
 
 async function toolClick(x, y) {
+  // Coordinates from Grok are in IMAGE pixels (because that's what they see).
+  // Convert to viewport CSS pixels using the latest snapshot's scale before
+  // calling document.elementFromPoint (which expects CSS pixels).
+  const dims = lastSnapDims;
+  let cssX = x;
+  let cssY = y;
+  if (dims && dims.imgWidth > 0 && dims.imgHeight > 0) {
+    cssX = x * (dims.cssWidth / dims.imgWidth);
+    cssY = y * (dims.cssHeight / dims.imgHeight);
+  }
   const tab = await getActiveTab();
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
@@ -761,16 +823,15 @@ async function toolClick(x, y) {
       el.scrollIntoView({ block: "center", behavior: "instant" });
       const tag = el.tagName.toLowerCase();
       const label = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim().slice(0, 80);
-      // Focus inputs so subsequent type() lands here
       if (typeof el.focus === "function") el.focus();
       el.click();
       return { ok: true, tag, label };
     },
-    args: [x, y]
+    args: [cssX, cssY]
   });
   await sleep(700);
   if (!result?.ok) return result?.error ?? "Click missed.";
-  return `Clicked <${result.tag}> "${result.label}".`;
+  return `Clicked <${result.tag}> "${result.label}" (image ${Math.round(x)},${Math.round(y)} → CSS ${Math.round(cssX)},${Math.round(cssY)}).`;
 }
 
 async function toolClickText(text, tag) {
@@ -812,7 +873,7 @@ async function toolClickText(text, tag) {
       target.click();
       return { ok: true, tag: target.tagName.toLowerCase(), label: (target.innerText || target.value || "").trim().slice(0, 60) };
     },
-    args: [text, tag]
+    args: [text, tag ?? null]
   });
   await sleep(700);
   if (!result?.ok) return result?.error ?? "click_text failed";
