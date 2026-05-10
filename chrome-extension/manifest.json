@@ -19,7 +19,8 @@
     "scripting",
     "storage",
     "notifications",
-    "downloads"
+    "downloads",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"

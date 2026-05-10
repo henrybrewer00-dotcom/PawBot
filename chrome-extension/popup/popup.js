@@ -6,6 +6,31 @@ const statusText = document.getElementById("status-text");
 const logEl = document.getElementById("log");
 const settingsBtn = document.getElementById("settings-btn");
 const clearBtn = document.getElementById("clear-btn");
+const bridgeDot = document.getElementById("bridge-dot");
+const bridgeText = document.getElementById("bridge-text");
+
+async function updateBridgeStatus() {
+  chrome.runtime.sendMessage({ type: "pawbot_bridge_status" }, (resp) => {
+    if (chrome.runtime.lastError || !resp) {
+      bridgeDot.className = "bridge-dot bad";
+      bridgeText.textContent = "Service worker asleep — try again";
+      return;
+    }
+    if (resp.connected && resp.bridgeRunning) {
+      bridgeDot.className = "bridge-dot ok";
+      bridgeText.textContent = "Connected to Pawbot app";
+    } else if (resp.bridgeRunning) {
+      bridgeDot.className = "bridge-dot bad";
+      bridgeText.textContent = `Backend unreachable: ${resp.lastError ?? "no response"}`;
+    } else {
+      bridgeDot.className = "bridge-dot bad";
+      bridgeText.textContent = "Bridge not running — kicking it…";
+      chrome.runtime.sendMessage({ type: "pawbot_kick_bridge" });
+    }
+  });
+}
+updateBridgeStatus();
+setInterval(updateBridgeStatus, 3000);
 
 clearBtn.addEventListener("click", async () => {
   const tempPort = chrome.runtime.connect({ name: "agent" });

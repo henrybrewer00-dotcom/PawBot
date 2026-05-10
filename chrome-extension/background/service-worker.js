@@ -256,11 +256,49 @@ async function clearAgentMessages() {
   try { await chrome.storage.session.remove("agentMessages"); } catch {}
 }
 
-chrome.runtime.onInstalled.addListener(() => { loadAgentMessages(); startBridgePoller(); });
-chrome.runtime.onStartup.addListener(() => { loadAgentMessages(); startBridgePoller(); });
+chrome.runtime.onInstalled.addListener(() => {
+  loadAgentMessages();
+  startBridgePoller();
+  try { chrome.alarms.create("pawbot-keepalive", { periodInMinutes: 0.5 }); } catch {}
+});
+chrome.runtime.onStartup.addListener(() => {
+  loadAgentMessages();
+  startBridgePoller();
+  try { chrome.alarms.create("pawbot-keepalive", { periodInMinutes: 0.5 }); } catch {}
+});
 // Best-effort kick on every script load (worker may have just woken up).
 loadAgentMessages();
 startBridgePoller();
+try { chrome.alarms.create("pawbot-keepalive", { periodInMinutes: 0.5 }); } catch {}
+
+// Alarm fires every 30s and forces the poller back to life if it died.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "pawbot-keepalive") {
+    if (!bridgeRunning) {
+      console.log("[Pawbot] keepalive alarm — bridge poller is stopped, restarting");
+      startBridgePoller();
+    }
+  }
+});
+
+// Allow popup to query bridge status.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "pawbot_bridge_status") {
+    sendResponse({
+      connected: lastBridgeStatus.connected,
+      lastSeenAt: lastBridgeStatus.lastSeenAt,
+      lastError: lastBridgeStatus.lastError,
+      bridgeRunning
+    });
+    return true;
+  }
+  if (msg?.type === "pawbot_kick_bridge") {
+    if (!bridgeRunning) startBridgePoller();
+    sendResponse({ bridgeRunning });
+    return true;
+  }
+  return false;
+});
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "agent") return;
@@ -394,34 +432,44 @@ async function runAgent(task, port, isStopped) {
   port.postMessage({ type: "error", text: "Pawbot ran out of steps. Try a smaller request." });
 }
 
+let lastBridgeStatus = { connected: false, lastSeenAt: null, lastError: null };
+
 async function startBridgePoller() {
-  if (bridgeRunning) return;
+  if (bridgeRunning) {
+    console.log("[Pawbot] bridge poller already running, skipping");
+    return;
+  }
   bridgeRunning = true;
+  console.log("[Pawbot] bridge poller starting");
   try {
     while (bridgeRunning) {
       let task = null;
       try {
         const res = await fetch(`${PAWBOT_BACKEND_URL}/api/browser/tasks/next`, { cache: "no-store" });
+        lastBridgeStatus = { connected: res.ok, lastSeenAt: Date.now(), lastError: res.ok ? null : `HTTP ${res.status}` };
         if (res.ok) {
           const data = await res.json();
           if (data?.id && data?.task) task = data;
         }
-      } catch {
-        // Backend not running — back off and try again.
+      } catch (err) {
+        lastBridgeStatus = { connected: false, lastSeenAt: Date.now(), lastError: err?.message ?? String(err) };
+        console.warn("[Pawbot] bridge fetch failed:", err?.message ?? err);
         await sleep(8000);
         continue;
       }
       if (!task) continue;
+      console.log("[Pawbot] picked up task", task.id, ":", (task.task || "").slice(0, 80));
       if (activeRun) {
-        // Re-queue is tricky; just report busy.
         await reportTaskResult(task.id, "Pawbot Browser was busy and couldn't take this task right now.");
         continue;
       }
       const result = await runTaskHeadless(task.task);
       await reportTaskResult(task.id, result);
+      console.log("[Pawbot] reported result for", task.id);
     }
   } finally {
     bridgeRunning = false;
+    console.log("[Pawbot] bridge poller stopped");
   }
 }
 
