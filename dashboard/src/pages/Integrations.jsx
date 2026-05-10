@@ -6,15 +6,15 @@ import StatusPill from '../components/StatusPill.jsx'
 const PROVIDERS = [
   {
     id: 'google_calendar',
-    name: 'Google Calendar via Composio',
+    name: 'Google Calendar',
     icon: '📅',
-    desc: 'Read upcoming appointments and events from the backend Composio connection.',
+    desc: 'Read upcoming appointments, events, and holidays from Google Calendar.',
   },
   {
     id: 'google_mail',
-    name: 'Gmail via Composio',
+    name: 'Gmail',
     icon: '📧',
-    desc: 'Read recent Gmail and generate a morning brief with Composio and Grok.',
+    desc: 'Read recent Gmail and generate a morning brief.',
   },
 ]
 
@@ -97,7 +97,7 @@ export default function Integrations() {
         const events = await api('/api/calendar/upcoming?limit=8')
         setCalendarEvents(events)
         setCalendarStatus('connected')
-        toast(`Composio Calendar returned ${events.length} upcoming event${events.length === 1 ? '' : 's'}.`)
+        toast(`Google Calendar returned ${events.length} upcoming event${events.length === 1 ? '' : 's'}.`)
       } catch (e) {
         setCalendarStatus('unavailable')
         toast(e.message, 'error')
@@ -113,7 +113,7 @@ export default function Integrations() {
         const messages = await api('/api/gmail/recent?limit=5')
         setGmailMessages(messages)
         setGmailStatus('connected')
-        toast(`Composio Gmail returned ${messages.length} recent message${messages.length === 1 ? '' : 's'}.`)
+        toast(`Gmail returned ${messages.length} recent message${messages.length === 1 ? '' : 's'}.`)
       } catch (e) {
         setGmailStatus('unavailable')
         toast(e.message, 'error')
@@ -231,6 +231,7 @@ export default function Integrations() {
                   {p.id === 'google_calendar' && providerConnected && (
                     <p className="pc-synced">
                       {calendarEvents.length} upcoming event{calendarEvents.length === 1 ? '' : 's'}
+                      {calendarEvents.some(event => event.isHoliday) && ' including holidays'}
                     </p>
                   )}
                   {p.id === 'google_mail' && providerConnected && (
@@ -244,8 +245,8 @@ export default function Integrations() {
                     disabled={busy}
                   >
                     {p.id === 'google_mail'
-                      ? (busy ? '⟳ Checking…' : providerConnected ? '⟳ Check Gmail' : 'Check Composio Gmail')
-                      : (busy ? '⟳ Checking…' : providerConnected ? '⟳ Check Calendar' : 'Check Composio Calendar')}
+                      ? (busy ? '⟳ Checking…' : providerConnected ? '⟳ Check Gmail' : 'Check Gmail')
+                      : (busy ? '⟳ Checking…' : providerConnected ? '⟳ Check Calendar' : 'Check Calendar')}
                   </button>
                 </div>
               )
@@ -257,7 +258,7 @@ export default function Integrations() {
           <div className="email-agent-panel glass-card">
             <div>
               <h2>Morning brief</h2>
-              <p>Uses Composio Gmail and Calendar, then Grok writes the daily summary.</p>
+              <p>Uses Gmail and Calendar, then writes the daily summary.</p>
             </div>
             <button className="glass-btn primary" onClick={handleEmailSummary} disabled={summarizing}>
               {summarizing ? '⟳ Generating…' : 'Generate Brief'}
@@ -321,8 +322,8 @@ export default function Integrations() {
           <div>
             <p className="info-title">How Google integration works</p>
             <p className="info-body">
-              Google Calendar and Gmail both use the Composio connection configured on the backend. The dashboard checks
-              the live connected account for upcoming events and recent emails, then Grok writes the morning brief.
+              Google Calendar and Gmail are checked from the connected backend account. The dashboard pulls upcoming
+              events, holidays, and recent emails, then writes the morning brief.
             </p>
           </div>
         </div>

@@ -56,18 +56,19 @@ export default function Overview() {
     setLoading(true)
     setError(null)
     try {
-      const [ms, logs, calendar, sa, gmail, brief] = await Promise.all([
+      const [ms, logs, calendar, gmail, brief] = await Promise.all([
         api(`/api/seniors/${seniorId}/medication-status/today`),
         api(`/api/seniors/${seniorId}/agent-logs`),
         api('/api/calendar/upcoming?limit=8')
           .then(events => ({ ok: true, events }))
           .catch(error => ({ ok: false, error })),
-        api(`/api/seniors/${seniorId}/scam-alerts`),
         api('/api/gmail/recent?limit=5')
           .then(messages => ({ ok: true, messages }))
           .catch(error => ({ ok: false, error })),
         api('/api/morning-brief/today').catch(() => null),
       ])
+      await api(`/api/seniors/${seniorId}/gmail/scan-scams`, { method: 'POST' }).catch(() => null)
+      const sa = await api(`/api/seniors/${seniorId}/scam-alerts`)
       setMedStatus(ms)
       setAgentLogs(logs.slice(0, 8))
       setScamAlerts(sa)
@@ -134,6 +135,8 @@ export default function Overview() {
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
   const calendarConnected = calendarStatus === 'connected'
   const gmailConnected = gmailStatus === 'connected'
+  const dashboardEvents = events?.slice(0, 4) ?? []
+  const previewEvents = events?.slice(0, 4) ?? []
 
   const runIntegrationSync = async () => {
     setSyncing(true)
@@ -142,6 +145,8 @@ export default function Overview() {
         api('/api/calendar/upcoming?limit=8'),
         api('/api/gmail/recent?limit=5'),
       ])
+      await api(`/api/seniors/${seniorId}/gmail/scan-scams`, { method: 'POST' }).catch(() => null)
+      setScamAlerts(await api(`/api/seniors/${seniorId}/scam-alerts`))
       setEvents(calendar)
       setCalendarStatus('connected')
       setGmailMessages(messages)
@@ -202,14 +207,14 @@ export default function Overview() {
           />
           <StatCard
             icon="📅" label="Upcoming Events"
-            value={loading ? '—' : (events?.length ?? '—')}
-            sub={calendarConnected ? (events?.[0]?.title ?? 'Composio Calendar connected') : 'Composio Calendar unavailable'}
+            value={loading ? '—' : dashboardEvents.length}
+            sub={calendarConnected ? (dashboardEvents[0]?.title ?? 'Google Calendar connected') : 'Google Calendar unavailable'}
             accent="var(--info)"
           />
           <StatCard
             icon="🛡" label="Scam Alerts"
             value={loading ? '—' : (scamAlerts?.length ?? '—')}
-            sub={gmailConnected ? (scamAlerts?.length ? `${scamAlerts[0].riskLevel} risk` : `${gmailMessages.length} recent emails`) : 'Composio Gmail unavailable'}
+            sub={gmailConnected ? (scamAlerts?.length ? `${scamAlerts[0].riskLevel} risk` : `${gmailMessages.length} recent emails`) : 'Gmail unavailable'}
             accent={scamAlerts?.length ? 'var(--danger)' : 'var(--success)'}
           />
         </div>
@@ -219,8 +224,8 @@ export default function Overview() {
             <div>
               <h3 className="section-heading">Google Integrations</h3>
               <div className="ic-status-row">
-                <IntegrationChip icon="📅" label="Composio Calendar" connected={calendarConnected} />
-                <IntegrationChip icon="📧" label="Composio Gmail" connected={gmailConnected} />
+                <IntegrationChip icon="📅" label="Google Calendar" connected={calendarConnected} />
+                <IntegrationChip icon="📧" label="Gmail" connected={gmailConnected} />
               </div>
             </div>
             <div className="ic-actions">
@@ -244,20 +249,23 @@ export default function Overview() {
             <div className="ic-panel">
               <div className="ic-panel-head">
                 <span>Calendar</span>
-                <span>{events?.length ?? 0} upcoming</span>
+                <span>{previewEvents.length} shown</span>
               </div>
               {!calendarConnected ? (
-                <Empty msg="Composio Calendar is not configured or connected." />
+                <Empty msg="Google Calendar is not configured or connected." />
               ) : !events?.length ? (
                 <Empty msg="No upcoming Google Calendar events." />
               ) : (
                 <div className="mini-event-list">
-                  {events.slice(0, 3).map(ev => (
+                  {previewEvents.map(ev => (
                     <div key={ev.id} className="mini-event">
                       <span className="mini-event-date">
                         {new Date(eventStart(ev)).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                       </span>
-                      <span className="mini-event-title">{ev.title}</span>
+                      <span className="mini-event-title">
+                        {ev.title}
+                        {ev.isHoliday && <span className="holiday-tag">Holiday</span>}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -267,10 +275,10 @@ export default function Overview() {
             <div className="ic-panel">
               <div className="ic-panel-head">
                 <span>Email</span>
-                <span>{gmailConnected ? `${gmailMessages.length} recent` : 'Composio'}</span>
+                <span>{gmailConnected ? `${gmailMessages.length} recent` : 'Google'}</span>
               </div>
               {!gmailConnected ? (
-                <Empty msg="Composio Gmail is not configured or connected." />
+                <Empty msg="Gmail is not configured or connected." />
               ) : morningBrief ? (
                 <p className="email-brief">{morningBrief.brief}</p>
               ) : (
@@ -345,15 +353,16 @@ export default function Overview() {
           </section>
         </div>
 
-        {events?.length > 0 && (
+        {dashboardEvents.length > 0 && (
           <section className="glass-card ov-section" style={{ marginTop: 16 }}>
             <h3 className="section-heading">Upcoming Events</h3>
             <div className="event-list">
-              {events.slice(0, 4).map(ev => (
+              {dashboardEvents.map(ev => (
                 <div key={ev.id} className="event-row">
                   <span className="event-type-dot" />
                   <div className="event-info">
                     <span className="event-title">{ev.title}</span>
+                    {ev.isHoliday && <span className="holiday-tag">Holiday</span>}
                     <span className="event-date">
                       {new Date(eventStart(ev)).toLocaleDateString('en-US', {
                         weekday: 'short', month: 'short', day: 'numeric',
@@ -458,6 +467,20 @@ export default function Overview() {
           white-space: nowrap;
           font-size: 13px;
           font-weight: 500;
+        }
+        .holiday-tag {
+          display: inline-flex;
+          align-items: center;
+          min-height: 18px;
+          margin-left: 8px;
+          padding: 2px 7px;
+          border-radius: 999px;
+          background: rgba(255, 193, 7, 0.15);
+          color: #8a5a00;
+          font-size: 10.5px;
+          font-weight: 700;
+          vertical-align: middle;
+          white-space: nowrap;
         }
         .mini-email-list { display: flex; flex-direction: column; gap: 9px; margin-bottom: 12px; }
         .mini-email { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
